@@ -5,13 +5,15 @@ programming language, written in pure Raven. It speaks the PostgreSQL v3 wire
 protocol directly over `std/net`, with no native dependencies.
 
 > Status: **v0.1.0**, an early but working release. It does the startup
-> handshake, authentication, and the simple query protocol (text results).
-> See [Roadmap](#roadmap) for what is next.
+> handshake, authentication, the simple query protocol, and parameterized
+> queries (text results). See [Roadmap](#roadmap) for what is next.
 
 ## Features
 
 - Connect and authenticate (trust and cleartext password).
 - Run any SQL with `query` (rows + columns) or `execute` (affected-row count).
+- **Parameterized queries** (`query_params` / `execute_params`) with `$1, $2, ...`
+  placeholders, values bound over the wire and never interpolated into the SQL.
 - Column names, row values, and SQL `NULL` handling.
 - Server errors surfaced as a Raven `Result` `Err` with the PostgreSQL
   severity, SQLSTATE code, and message; the connection stays usable afterward.
@@ -65,9 +67,21 @@ connect(host: String, port: Int, user: String, password: String, database: Strin
 - `query(sql: String) -> Result<QueryResult, Error>` runs a statement and
   collects its result. A `SELECT` fills `columns` and `rows`; a write fills
   `affected`.
-- `execute(sql: String) -> Result<Int, Error>` runs a statement and returns
-  only the affected-row count.
+- `query_params(sql: String, params: List<String>) -> Result<QueryResult, Error>`
+  runs a statement with `$1, $2, ...` placeholders, binding each value over the
+  wire. Use this for any user-supplied value: the value is sent as data, not
+  spliced into the SQL text. PostgreSQL infers parameter types from context
+  (column types or casts such as `$1::int`).
+- `execute(sql: String) -> Result<Int, Error>` and
+  `execute_params(sql: String, params: List<String>) -> Result<Int, Error>` run
+  a statement and return only the affected-row count.
 - `close()` sends Terminate and closes the socket.
+
+```raven
+// Safe: the value is bound, never concatenated into SQL.
+let _ = conn.execute_params("INSERT INTO users (name) VALUES ($1)", [userName])
+let res = conn.query_params("SELECT id FROM users WHERE name = $1", [userName])?
+```
 
 `QueryResult`: `columns: List<String>`, `rows: List<Row>`, `affected: Int`,
 and `row_count() -> Int`.
@@ -102,9 +116,8 @@ user `raven`, password `ravenpw`, database `ravendb`.
 
 ## Roadmap
 
-- Parameterized queries (the extended query protocol: Parse/Bind/Execute), for
-  safe value binding instead of string interpolation.
 - `md5` and `scram-sha-256` authentication.
+- NULL and typed parameter binding (today every bound value is a non-null string).
 - TLS (`sslmode`) using Raven's `std/tls` `upgrade`.
 - Typed value decoding (integers, booleans, timestamps) beyond text.
 - Connection pooling helpers.

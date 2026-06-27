@@ -48,6 +48,18 @@ fun run(conn: Connection) {
         Err(e) -> println("select failed: ${e.message()}"),
     }
 
+    // Parameterized: the value is bound over the wire, never spliced into SQL,
+    // so user input (even a name with a quote) is safe.
+    let _ = conn.execute_params("INSERT INTO pets (name, age) VALUES ($1, $2)", ["o'brien", "7"])
+    match conn.query_params("SELECT name FROM pets WHERE age > $1 ORDER BY age", ["3"]) {
+        Ok(res) -> {
+            for row in res.rows {
+                println("older than 3: ${row.get(0)}")
+            }
+        },
+        Err(e) -> println("param query failed: ${e.message()}"),
+    }
+
     // A failed statement returns an Err; the connection stays usable afterward.
     match conn.query("SELECT * FROM does_not_exist") {
         Ok(res) -> println("unexpected success"),

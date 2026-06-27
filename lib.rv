@@ -1,8 +1,9 @@
 // raven-postgres: a PostgreSQL client written in pure Raven.
 //
 // It speaks the PostgreSQL v3 frontend/backend wire protocol directly over a
-// std/net TCP stream: a startup handshake, authentication, and the simple
-// query protocol (text-format results). No native dependencies.
+// std/net TCP stream: a startup handshake, authentication, the simple query
+// protocol, and parameterized queries via the extended protocol (text-format
+// results). No native dependencies.
 //
 // Supported auth: trust (AuthenticationOk) and cleartext password. MD5 and
 // SCRAM-SHA-256 are not implemented yet (they need MD5/SHA-256 in the runtime)
@@ -165,6 +166,48 @@ fun read_message(stream: TcpStream) -> Result<Message, Error> {
     return Ok(Message { mtype, payload })
 }
 
+// ===== extended query protocol (parameterized statements) =====
+//
+// Parse + Bind + Describe + Execute + Sync sent as one batch. Parameters are
+// bound in text format with their types left for the server to infer, so values
+// are passed as strings and never interpolated into the SQL.
+
+// Parse: an unnamed prepared statement for `sql` with no declared parameter
+// types (the server infers them).
+fun parse_message(sql: String) -> String {
+    let payload = cstr("").concat(cstr(sql)).concat(int16_be(0))
+    return frame("P", payload)
+}
+
+// Bind the unnamed portal to the unnamed statement, all parameters and results
+// in text format. A NULL parameter is sent as length -1; here every value is a
+// non-null string.
+fun bind_message(params: List<String>) -> String {
+    let payload = cstr("").concat(cstr(""))
+    payload = payload.concat(int16_be(0))
+    payload = payload.concat(int16_be(params.len()))
+    for p in params {
+        payload = payload.concat(int32_be(p.length())).concat(p)
+    }
+    payload = payload.concat(int16_be(0))
+    return frame("B", payload)
+}
+
+// Describe the unnamed portal, so the server returns a RowDescription.
+fun describe_portal_message() -> String {
+    return frame("D", chr(80).concat(cstr("")))
+}
+
+// Execute the unnamed portal with no row limit.
+fun execute_message() -> String {
+    return frame("E", cstr("").concat(int32_be(0)))
+}
+
+// Sync: end the batch and ask for ReadyForQuery.
+fun sync_message() -> String {
+    return frame("S", "")
+}
+
 // ===== payload parsing =====
 
 // An ErrorResponse / NoticeResponse payload: typed, NUL-terminated fields ended
@@ -274,6 +317,34 @@ fun drain_until_ready(stream: TcpStream) {
     }
 }
 
+// Read backend messages until ReadyForQuery, building the result. Shared by the
+// simple and extended query paths; both produce the same T/D/C/E/Z stream, and
+// the ParseComplete/BindComplete/ParameterDescription/NoData messages the
+// extended path adds are simply ignored here.
+fun read_query_result(stream: TcpStream) -> Result<QueryResult, Error> {
+    let columns: List<String> = []
+    let rows: List<Row> = []
+    let affected = 0
+    let done = false
+    while !done {
+        let msg = read_message(stream)?
+        if msg.mtype == 84 {
+            columns = parse_row_description(msg.payload)
+        } else if msg.mtype == 68 {
+            rows.push(parse_data_row(msg.payload))
+        } else if msg.mtype == 67 {
+            affected = parse_affected(msg.payload)
+        } else if msg.mtype == 69 {
+            let perr = parse_error(msg.payload)
+            drain_until_ready(stream)
+            return Err(perr)
+        } else if msg.mtype == 90 {
+            done = true
+        }
+    }
+    return Ok(QueryResult { columns, rows, affected })
+}
+
 // Run the startup authentication loop until ReadyForQuery.
 fun authenticate(stream: TcpStream, password: String) -> Result<Bool, Error> {
     let done = false
@@ -324,32 +395,32 @@ impl Connection {
     // SELECT fills `columns` and `rows`, a write fills `affected`.
     fun query(self, sql: String) -> Result<QueryResult, Error> {
         let _ = self.stream.write(frame("Q", cstr(sql)))?
-        let columns: List<String> = []
-        let rows: List<Row> = []
-        let affected = 0
-        let done = false
-        while !done {
-            let msg = read_message(self.stream)?
-            if msg.mtype == 84 {
-                columns = parse_row_description(msg.payload)
-            } else if msg.mtype == 68 {
-                rows.push(parse_data_row(msg.payload))
-            } else if msg.mtype == 67 {
-                affected = parse_affected(msg.payload)
-            } else if msg.mtype == 69 {
-                let perr = parse_error(msg.payload)
-                drain_until_ready(self.stream)
-                return Err(perr)
-            } else if msg.mtype == 90 {
-                done = true
-            }
-        }
-        return Ok(QueryResult { columns, rows, affected })
+        return read_query_result(self.stream)
+    }
+
+    // Run a statement with bound parameters, referenced in `sql` as $1, $2, ...
+    // Values are passed as text and never interpolated into the SQL, so this is
+    // the safe way to pass user input. Types are inferred from context (column
+    // types, casts), e.g. "INSERT INTO t (n) VALUES ($1)" or "... WHERE id = $1".
+    fun query_params(self, sql: String, params: List<String>) -> Result<QueryResult, Error> {
+        let batch = parse_message(sql)
+        batch = batch.concat(bind_message(params))
+        batch = batch.concat(describe_portal_message())
+        batch = batch.concat(execute_message())
+        batch = batch.concat(sync_message())
+        let _ = self.stream.write(batch)?
+        return read_query_result(self.stream)
     }
 
     // Run a statement and return just the affected-row count.
     fun execute(self, sql: String) -> Result<Int, Error> {
         let res = self.query(sql)?
+        return Ok(res.affected)
+    }
+
+    // Run a parameterized statement and return just the affected-row count.
+    fun execute_params(self, sql: String, params: List<String>) -> Result<Int, Error> {
+        let res = self.query_params(sql, params)?
         return Ok(res.affected)
     }
 
