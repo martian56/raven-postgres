@@ -1,0 +1,58 @@
+// A basic raven-postgres walkthrough: connect, create a table, insert, select,
+// and handle an error. Edit the connection constants for your database, then:
+//
+//   raven build examples/basic.rv -o basic && ./basic
+//
+// (or `rvpm run` from a project that depends on this package).
+
+import std/io { println }
+import "../lib" { connect, Connection }
+
+const HOST: String = "127.0.0.1"
+const PORT: Int = 5432
+const USER: String = "raven"
+const PASSWORD: String = "ravenpw"
+const DATABASE: String = "ravendb"
+
+fun main() {
+    match connect(HOST, PORT, USER, PASSWORD, DATABASE) {
+        Ok(conn) -> {
+            run(conn)
+            conn.close()
+        },
+        Err(e) -> println("connect failed: ${e.message()}"),
+    }
+}
+
+fun run(conn: Connection) {
+    let _ = conn.execute("DROP TABLE IF EXISTS pets")
+    let _ = conn.execute("CREATE TABLE pets (id SERIAL PRIMARY KEY, name TEXT, age INT)")
+
+    match conn.execute("INSERT INTO pets (name, age) VALUES ('rex', 4), ('mia', 2), ('nil', NULL)") {
+        Ok(n) -> println("inserted ${n} rows"),
+        Err(e) -> println("insert failed: ${e.message()}"),
+    }
+
+    match conn.query("SELECT id, name, age FROM pets ORDER BY id") {
+        Ok(res) -> {
+            println("${res.columns[0]} | ${res.columns[1]} | ${res.columns[2]}")
+            for row in res.rows {
+                let age = if row.is_null(2) {
+                    "NULL"
+                } else {
+                    row.get(2)
+                }
+                println("${row.get(0)} | ${row.get(1)} | ${age}")
+            }
+        },
+        Err(e) -> println("select failed: ${e.message()}"),
+    }
+
+    // A failed statement returns an Err; the connection stays usable afterward.
+    match conn.query("SELECT * FROM does_not_exist") {
+        Ok(res) -> println("unexpected success"),
+        Err(e) -> println("expected error: ${e.message()}"),
+    }
+
+    let _ = conn.execute("DROP TABLE pets")
+}

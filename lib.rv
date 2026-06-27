@@ -1,0 +1,381 @@
+// raven-postgres: a PostgreSQL client written in pure Raven.
+//
+// It speaks the PostgreSQL v3 frontend/backend wire protocol directly over a
+// std/net TCP stream: a startup handshake, authentication, and the simple
+// query protocol (text-format results). No native dependencies.
+//
+// Supported auth: trust (AuthenticationOk) and cleartext password. MD5 and
+// SCRAM-SHA-256 are not implemented yet (they need MD5/SHA-256 in the runtime)
+// and return a clear error.
+//
+// Usage:
+//   import "github.com/martian56/raven-postgres" { connect }
+//   let conn = connect("127.0.0.1", 5432, "user", "pass", "mydb")?
+//   let res = conn.query("SELECT id, name FROM users")?
+//   for row in res.rows { println(row.get(0)) }
+//   conn.close()
+
+import std/net { TcpStream }
+import "./transport" { tcp_dial }
+import std/string
+import std/error { error_kind }
+
+// ===== handle and result types =====
+
+// A live connection to a PostgreSQL server.
+struct Connection {
+    stream: TcpStream,
+}
+
+// One decoded backend message: a type byte and its raw payload bytes.
+struct Message {
+    mtype: Int,
+    payload: String,
+}
+
+// A result row. Values are the text-format column values; `nulls[i]` is true
+// when column i was SQL NULL (and `values[i]` is the empty string).
+struct Row {
+    values: List<String>,
+    nulls: List<Bool>,
+}
+
+// The result of a query: the column names from the row description, the rows,
+// and the affected-row count parsed from the command tag (INSERT/UPDATE/DELETE).
+struct QueryResult {
+    columns: List<String>,
+    rows: List<Row>,
+    affected: Int,
+}
+
+// ===== byte toolkit =====
+
+// A one-byte string holding byte value `n` (low 8 bits).
+fun chr(n: Int) -> String {
+    return __str_from_byte(n & 255)
+}
+
+// `s` followed by a NUL terminator (a C string).
+fun cstr(s: String) -> String {
+    return s.concat(chr(0))
+}
+
+// Big-endian 16-bit and 32-bit integers as 2 and 4 byte strings.
+fun int16_be(n: Int) -> String {
+    return chr((n >> 8) & 255).concat(chr(n & 255))
+}
+
+fun int32_be(n: Int) -> String {
+    let out = chr((n >> 24) & 255)
+    out = out.concat(chr((n >> 16) & 255))
+    out = out.concat(chr((n >> 8) & 255))
+    out = out.concat(chr(n & 255))
+    return out
+}
+
+// Read big-endian integers out of a buffer at byte offset `off`.
+fun read_int16_be(s: String, off: Int) -> Int {
+    return (__str_byte_at(s, off) << 8) | __str_byte_at(s, off + 1)
+}
+
+fun read_int32_be(s: String, off: Int) -> Int {
+    let b0 = __str_byte_at(s, off)
+    let b1 = __str_byte_at(s, off + 1)
+    let b2 = __str_byte_at(s, off + 2)
+    let b3 = __str_byte_at(s, off + 3)
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+// Index of the next NUL byte at or after `from`, or the length if none.
+fun find_nul(s: String, from: Int) -> Int {
+    let i = from
+    let n = s.length()
+    while i < n {
+        if __str_byte_at(s, i) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Parse a run of ASCII digits into an Int; any non-digit yields 0.
+fun digits_to_int(s: String) -> Int {
+    let n = s.length()
+    if n == 0 {
+        return 0
+    }
+    let result = 0
+    let i = 0
+    while i < n {
+        let c = __str_byte_at(s, i)
+        if c >= 48 && c <= 57 {
+            result = result * 10 + (c - 48)
+        } else {
+            return 0
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ===== framing =====
+
+// Build a typed frontend message: the type byte, an int32 length covering the
+// length field and the payload, then the payload.
+fun frame(mtype: String, payload: String) -> String {
+    return mtype.concat(int32_be(4 + payload.length())).concat(payload)
+}
+
+// The startup packet (it has no type byte): protocol 3.0 then NUL-terminated
+// parameter key/value pairs, ending with an extra NUL.
+fun startup_message(user: String, database: String) -> String {
+    let body = int32_be(196608)
+    body = body.concat(cstr("user")).concat(cstr(user))
+    body = body.concat(cstr("database")).concat(cstr(database))
+    body = body.concat(chr(0))
+    return int32_be(4 + body.length()).concat(body)
+}
+
+// Read exactly `n` bytes, looping until they all arrive. A clean EOF is an
+// error, since the protocol never closes mid-message.
+fun read_exact(stream: TcpStream, n: Int) -> Result<String, Error> {
+    let buf = ""
+    let have = 0
+    while have < n {
+        let chunk = stream.read(n - have)?
+        if chunk.length() == 0 {
+            return Err(error_kind("postgres", "connection closed by server"))
+        }
+        buf = buf.concat(chunk)
+        have = have + chunk.length()
+    }
+    return Ok(buf)
+}
+
+// Read one backend message: a 1-byte type, an int32 length, then the payload.
+fun read_message(stream: TcpStream) -> Result<Message, Error> {
+    let header = read_exact(stream, 5)?
+    let mtype = __str_byte_at(header, 0)
+    let len = read_int32_be(header, 1)
+    let payload = ""
+    if len > 4 {
+        payload = read_exact(stream, len - 4)?
+    }
+    return Ok(Message { mtype, payload })
+}
+
+// ===== payload parsing =====
+
+// An ErrorResponse / NoticeResponse payload: typed, NUL-terminated fields ended
+// by a zero type byte. We surface severity, SQLSTATE code, and message.
+fun parse_error(payload: String) -> Error {
+    let off = 0
+    let n = payload.length()
+    let message = ""
+    let code = ""
+    let severity = ""
+    while off < n {
+        let ftype = __str_byte_at(payload, off)
+        if ftype == 0 {
+            off = n
+        } else {
+            off = off + 1
+            let end = find_nul(payload, off)
+            let val = payload.substring(off, end)
+            if ftype == 77 {
+                message = val
+            }
+            if ftype == 67 {
+                code = val
+            }
+            if ftype == 83 {
+                severity = val
+            }
+            off = end + 1
+        }
+    }
+    return error_kind("postgres", "${severity} ${code}: ${message}")
+}
+
+// RowDescription: an int16 field count, then per field a NUL-terminated name
+// followed by 18 bytes of OID/length/format metadata we skip.
+fun parse_row_description(payload: String) -> List<String> {
+    let cols: List<String> = []
+    let count = read_int16_be(payload, 0)
+    let off = 2
+    let i = 0
+    while i < count {
+        let end = find_nul(payload, off)
+        cols.push(payload.substring(off, end))
+        off = end + 1 + 18
+        i = i + 1
+    }
+    return cols
+}
+
+// DataRow: an int16 column count, then per column an int32 byte length (a length
+// of -1, encoded as 0xFFFFFFFF, means NULL) followed by that many text bytes.
+fun parse_data_row(payload: String) -> Row {
+    let values: List<String> = []
+    let nulls: List<Bool> = []
+    let count = read_int16_be(payload, 0)
+    let off = 2
+    let i = 0
+    while i < count {
+        let len = read_int32_be(payload, off)
+        off = off + 4
+        if len == 4294967295 {
+            values.push("")
+            nulls.push(true)
+        } else {
+            values.push(payload.substring(off, off + len))
+            nulls.push(false)
+            off = off + len
+        }
+        i = i + 1
+    }
+    return Row { values, nulls }
+}
+
+// CommandComplete tag, e.g. "INSERT 0 5", "UPDATE 3", "SELECT 10". The affected
+// count is the last whitespace-separated token when it is numeric, else 0.
+fun parse_affected(payload: String) -> Int {
+    let end = find_nul(payload, 0)
+    let tag = payload.substring(0, end)
+    let i = tag.length() - 1
+    let start = 0
+    while i >= 0 {
+        if __str_byte_at(tag, i) == 32 {
+            start = i + 1
+            i = 0 - 1
+        } else {
+            i = i - 1
+        }
+    }
+    return digits_to_int(tag.substring(start, tag.length()))
+}
+
+// After an error mid-exchange, read until ReadyForQuery so the connection can be
+// reused. Best effort: any read failure just ends the drain.
+fun drain_until_ready(stream: TcpStream) {
+    let done = false
+    while !done {
+        match read_message(stream) {
+            Ok(msg) -> {
+                if msg.mtype == 90 {
+                    done = true
+                }
+            },
+            Err(e) -> {
+                done = true
+            },
+        }
+    }
+}
+
+// Run the startup authentication loop until ReadyForQuery.
+fun authenticate(stream: TcpStream, password: String) -> Result<Bool, Error> {
+    let done = false
+    while !done {
+        let msg = read_message(stream)?
+        if msg.mtype == 82 {
+            let auth = read_int32_be(msg.payload, 0)
+            if auth == 0 {
+                let ok = true
+            } else if auth == 3 {
+                let _ = stream.write(frame("p", cstr(password)))?
+            } else {
+                return Err(
+                    error_kind(
+                        "postgres",
+                        "unsupported auth method ${auth}; only trust and cleartext password are supported",
+                    ),
+                )
+            }
+        } else if msg.mtype == 69 {
+            return Err(parse_error(msg.payload))
+        } else if msg.mtype == 90 {
+            done = true
+        }
+    }
+    return Ok(true)
+}
+
+// ===== public API =====
+
+// Connect to a PostgreSQL server and authenticate. `host` is a name or IP,
+// `port` the TCP port (usually 5432).
+fun connect(
+    host: String,
+    port: Int,
+    user: String,
+    password: String,
+    database: String,
+) -> Result<Connection, Error> {
+    let stream = tcp_dial("${host}:${port}")?
+    let _ = stream.write(startup_message(user, database))?
+    authenticate(stream, password)?
+    return Ok(Connection { stream })
+}
+
+impl Connection {
+    // Run a SQL statement and collect its result. Works for any statement: a
+    // SELECT fills `columns` and `rows`, a write fills `affected`.
+    fun query(self, sql: String) -> Result<QueryResult, Error> {
+        let _ = self.stream.write(frame("Q", cstr(sql)))?
+        let columns: List<String> = []
+        let rows: List<Row> = []
+        let affected = 0
+        let done = false
+        while !done {
+            let msg = read_message(self.stream)?
+            if msg.mtype == 84 {
+                columns = parse_row_description(msg.payload)
+            } else if msg.mtype == 68 {
+                rows.push(parse_data_row(msg.payload))
+            } else if msg.mtype == 67 {
+                affected = parse_affected(msg.payload)
+            } else if msg.mtype == 69 {
+                let perr = parse_error(msg.payload)
+                drain_until_ready(self.stream)
+                return Err(perr)
+            } else if msg.mtype == 90 {
+                done = true
+            }
+        }
+        return Ok(QueryResult { columns, rows, affected })
+    }
+
+    // Run a statement and return just the affected-row count.
+    fun execute(self, sql: String) -> Result<Int, Error> {
+        let res = self.query(sql)?
+        return Ok(res.affected)
+    }
+
+    // Send Terminate and close the socket. Best effort.
+    fun close(self) {
+        let _ = self.stream.write(frame("X", ""))
+        self.stream.close()
+    }
+}
+
+impl Row {
+    // Text value of column `i`. Empty string when the column is NULL; check
+    // `is_null` to tell an empty string from a NULL.
+    fun get(self, i: Int) -> String {
+        return self.values[i]
+    }
+
+    // Whether column `i` was SQL NULL.
+    fun is_null(self, i: Int) -> Bool {
+        return self.nulls[i]
+    }
+}
+
+impl QueryResult {
+    // Number of rows returned.
+    fun row_count(self) -> Int {
+        return self.rows.len()
+    }
+}
