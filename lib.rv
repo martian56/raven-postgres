@@ -16,8 +16,8 @@
 //   for row in res.rows { println(row.get(0)) }
 //   conn.close()
 
+import std/net
 import std/net { TcpStream }
-import "./transport" { tcp_dial }
 import std/string
 import std/error { error_kind }
 
@@ -384,7 +384,7 @@ fun connect(
     password: String,
     database: String,
 ) -> Result<Connection, Error> {
-    let stream = tcp_dial("${host}:${port}")?
+    let stream = net.connect("${host}:${port}")?
     let _ = stream.write(startup_message(user, database))?
     authenticate(stream, password)?
     return Ok(Connection { stream })

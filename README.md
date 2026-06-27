@@ -18,6 +18,11 @@ protocol directly over `std/net`, with no native dependencies.
 - Server errors surfaced as a Raven `Result` `Err` with the PostgreSQL
   severity, SQLSTATE code, and message; the connection stays usable afterward.
 
+## Requirements
+
+Raven 2.19.1 or newer (it uses a bare `import std/net` through a qualifier,
+which resolves in a library only from 2.19.1).
+
 ## Install
 
 In your `rv.toml`:
