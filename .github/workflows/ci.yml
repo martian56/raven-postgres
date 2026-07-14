@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: martian56/setup-raven@v1
+        with:
+          raven-version: "2.25.6"
+      - run: rvpm fmt --check
+      - run: rvpm build
+      - run: rvpm test
+      - run: rvpm doc
+
+  postgres-e2e:
+    name: PostgreSQL 16 end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: martian56/setup-raven@v1
+        with:
+          raven-version: "2.25.6"
+      - run: sh scripts/test-e2e.sh
