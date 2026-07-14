@@ -1,7 +1,8 @@
 // A basic raven-postgres walkthrough: connect, create a table, insert, select,
 // and handle an error. Edit the connection constants for your database, then:
 //
-//   raven build examples/basic.rv -o basic && ./basic
+//   docker compose up -d --wait
+//   raven build examples/basic.rv -o target/basic && ./target/basic
 //
 // (or `rvpm run` from a project that depends on this package).
 
@@ -9,7 +10,7 @@ import std/io { println }
 import "../lib" { connect, Connection }
 
 const HOST: String = "127.0.0.1"
-const PORT: Int = 5432
+const PORT: Int = 55432
 const USER: String = "raven"
 const PASSWORD: String = "ravenpw"
 const DATABASE: String = "ravendb"
@@ -51,6 +52,8 @@ fun run(conn: Connection) {
     // Parameterized: the value is bound over the wire, never spliced into SQL,
     // so user input (even a name with a quote) is safe.
     let _ = conn.execute_params("INSERT INTO pets (name, age) VALUES ($1, $2)", ["o'brien", "7"])
+    let nullable: List<Option<String>> = [Some("raven"), None]
+    let _ = conn.execute_optional_params("INSERT INTO pets (name, age) VALUES ($1, $2)", nullable)
     match conn.query_params("SELECT name FROM pets WHERE age > $1 ORDER BY age", ["3"]) {
         Ok(res) -> {
             for row in res.rows {
