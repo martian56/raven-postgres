@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: raven
+      POSTGRES_PASSWORD: ravenpw
+      POSTGRES_DB: ravendb
+      POSTGRES_HOST_AUTH_METHOD: password
+    ports:
+      - "${RAVEN_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raven -d ravendb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
