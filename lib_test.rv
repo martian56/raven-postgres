@@ -1,6 +1,6 @@
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg, assert_true }
-import "./lib" { bind_message, chr, digits_to_int, frame, int16_be, int32_be, parse_affected, parse_data_row, parse_error, parse_message, parse_row_description, read_int16_be, read_int32_be, startup_message }
+import "./lib" { bind_message, bind_message_optional, chr, digits_to_int, frame, int16_be, int32_be, parse_affected, parse_data_row, parse_error, parse_message, parse_row_description, read_int16_be, read_int32_be, startup_message }
 
 fun zeroes(count: Int) -> String {
     let out = ""
@@ -42,6 +42,14 @@ fun test_parse_and_bind_messages() {
     assert_eq_int(__str_byte_at(bind, 0), 66)
     assert_true(bind.contains(int32_be(5).concat("hello")))
     assert_true(bind.contains(int32_be(2).concat("42")))
+}
+
+fun test_bind_message_supports_null_parameters() {
+    let params: List<Option<String>> = [Some("hello"), None, Some("")]
+    let bind = bind_message_optional(params)
+    assert_true(bind.contains(int32_be(5).concat("hello")))
+    assert_true(bind.contains(int32_be(4294967295)))
+    assert_true(bind.contains(int32_be(0)))
 }
 
 fun test_parse_error_fields() {

@@ -182,15 +182,34 @@ fun parse_message(sql: String) -> String {
 // Bind the unnamed portal to the unnamed statement, all parameters and results
 // in text format. A NULL parameter is sent as length -1; here every value is a
 // non-null string.
-fun bind_message(params: List<String>) -> String {
+fun bind_message_optional(params: List<Option<String>>) -> String {
     let payload = cstr("").concat(cstr(""))
     payload = payload.concat(int16_be(0))
     payload = payload.concat(int16_be(params.len()))
     for p in params {
-        payload = payload.concat(int32_be(p.length())).concat(p)
+        match p {
+            Some(value) -> {
+                payload = payload.concat(int32_be(value.length())).concat(value)
+            },
+            None -> {
+                payload = payload.concat(int32_be(4294967295))
+            },
+        }
     }
     payload = payload.concat(int16_be(0))
     return frame("B", payload)
+}
+
+fun text_params(params: List<String>) -> List<Option<String>> {
+    let out: List<Option<String>> = []
+    for value in params {
+        out.push(Some(value))
+    }
+    return out
+}
+
+fun bind_message(params: List<String>) -> String {
+    return bind_message_optional(text_params(params))
 }
 
 // Describe the unnamed portal, so the server returns a RowDescription.
@@ -412,6 +431,21 @@ impl Connection {
         return read_query_result(self.stream)
     }
 
+    // Parameterized query variant that can bind SQL NULL with `None`.
+    fun query_optional_params(
+        self,
+        sql: String,
+        params: List<Option<String>>,
+    ) -> Result<QueryResult, Error> {
+        let batch = parse_message(sql)
+        batch = batch.concat(bind_message_optional(params))
+        batch = batch.concat(describe_portal_message())
+        batch = batch.concat(execute_message())
+        batch = batch.concat(sync_message())
+        let _ = self.stream.write(batch)?
+        return read_query_result(self.stream)
+    }
+
     // Run a statement and return just the affected-row count.
     fun execute(self, sql: String) -> Result<Int, Error> {
         let res = self.query(sql)?
@@ -421,6 +455,16 @@ impl Connection {
     // Run a parameterized statement and return just the affected-row count.
     fun execute_params(self, sql: String, params: List<String>) -> Result<Int, Error> {
         let res = self.query_params(sql, params)?
+        return Ok(res.affected)
+    }
+
+    // Parameterized write variant that can bind SQL NULL with `None`.
+    fun execute_optional_params(
+        self,
+        sql: String,
+        params: List<Option<String>>,
+    ) -> Result<Int, Error> {
+        let res = self.query_optional_params(sql, params)?
         return Ok(res.affected)
     }
 
