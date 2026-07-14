@@ -309,3 +309,120 @@ fun test_e2e_empty_result_retains_column_names() {
     assert_eq_str(result.columns[1], "label")
     conn.close()
 }
+
+fun test_e2e_unicode_round_trip() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_postgres_unicode"))
+    let _ = must(conn.execute("CREATE TABLE raven_postgres_unicode (value TEXT NOT NULL)"))
+    let value = "Raven says salam: Bakı 🐦 — PostgreSQL"
+    let _ = must(conn.execute_params("INSERT INTO raven_postgres_unicode VALUES ($1)", [value]))
+    let result = must(conn.query("SELECT value FROM raven_postgres_unicode"))
+    assert_eq_str(result.rows[0].get(0), value)
+    let _ = must(conn.execute("DROP TABLE raven_postgres_unicode"))
+    conn.close()
+}
+
+fun test_e2e_large_parameter_and_result_round_trip() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_postgres_large"))
+    let _ = must(conn.execute("CREATE TABLE raven_postgres_large (value TEXT NOT NULL)"))
+    let value = repeated_text("raven-postgres-", 262144)
+    assert_eq_int(
+        must(conn.execute_params("INSERT INTO raven_postgres_large VALUES ($1)", [value])),
+        1,
+    )
+    let stored = must(conn.query("SELECT value FROM raven_postgres_large"))
+    assert_eq_int(stored.rows[0].get(0).length(), 262144)
+    assert_eq_str(stored.rows[0].get(0), value)
+
+    let large = must(conn.query("SELECT repeat('z', 17000000) AS payload"))
+    assert_eq_int(large.rows[0].get(0).length(), 17000000)
+    let _ = must(conn.execute("DROP TABLE raven_postgres_large"))
+    conn.close()
+}
+
+fun test_e2e_many_rows_preserve_order_and_boundaries() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let result = must(
+        conn.query(
+            "SELECT value, 'row-' || value::text AS label FROM generate_series(1, 500) AS value ORDER BY value",
+        ),
+    )
+    assert_eq_int(result.row_count(), 500)
+    assert_eq_str(result.rows[0].get(1), "row-1")
+    assert_eq_str(result.rows[249].get(1), "row-250")
+    assert_eq_str(result.rows[499].get(1), "row-500")
+    conn.close()
+}
+
+fun test_e2e_separate_connections_observe_committed_writes() {
+    if !e2e_enabled() {
+        return
+    }
+    let writer = open_test_db()
+    let reader = open_test_db()
+    let _ = must(writer.execute("DROP TABLE IF EXISTS raven_postgres_connections"))
+    let _ = must(writer.execute("CREATE TABLE raven_postgres_connections (value TEXT NOT NULL)"))
+    let _ = must(writer.execute("INSERT INTO raven_postgres_connections VALUES ('visible')"))
+    let result = must(reader.query("SELECT value FROM raven_postgres_connections"))
+    assert_eq_str(result.rows[0].get(0), "visible")
+    let _ = must(writer.execute("DROP TABLE raven_postgres_connections"))
+    reader.close()
+    writer.close()
+}
+
+fun test_e2e_typed_parameter_coercion() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let result = must(
+        conn.query_params(
+            "SELECT $1::integer + $2::integer AS total, $3::date AS chosen_date, $1::text || $2::text AS joined",
+            ["20", "22", "2026-07-14"],
+        ),
+    )
+    assert_eq_str(result.rows[0].get(0), "42")
+    assert_eq_str(result.rows[0].get(1), "2026-07-14")
+    assert_eq_str(result.rows[0].get(2), "2022")
+    conn.close()
+}
+
+fun test_e2e_optional_parameter_in_query() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let params: List<Option<String>> = [None, Some("present")]
+    let result = must(
+        conn.query_optional_params(
+            "SELECT $1::text IS NULL AS first_is_null, $2::text AS second_value",
+            params,
+        ),
+    )
+    assert_eq_str(result.rows[0].get(0), "t")
+    assert_eq_str(result.rows[0].get(1), "present")
+    conn.close()
+}
+
+fun test_e2e_parameter_error_keeps_connection_usable() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    match conn.query_params("SELECT $1::integer", ["not-an-integer"]) {
+        Ok(result) -> assert_msg(false, "expected invalid integer to fail"),
+        Err(e) -> assert_msg(e.message().contains("22P02"), e.message()),
+    }
+    assert_true(must(conn.ping()))
+    conn.close()
+}
