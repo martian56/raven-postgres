@@ -1,0 +1,90 @@
+import std/string
+import std/test { assert_eq_int, assert_eq_str, assert_msg, assert_true }
+import "./lib" { bind_message, chr, digits_to_int, frame, int16_be, int32_be, parse_affected, parse_data_row, parse_error, parse_message, parse_row_description, read_int16_be, read_int32_be, startup_message }
+
+fun zeroes(count: Int) -> String {
+    let out = ""
+    let i = 0
+    while i < count {
+        out = out.concat(chr(0))
+        i = i + 1
+    }
+    return out
+}
+
+fun test_big_endian_integers_round_trip() {
+    assert_eq_int(read_int16_be(int16_be(48879), 0), 48879)
+    assert_eq_int(read_int32_be(int32_be(305419896), 0), 305419896)
+}
+
+fun test_typed_message_frame() {
+    let packet = frame("Q", "SELECT 1".concat(chr(0)))
+    assert_eq_int(__str_byte_at(packet, 0), 81)
+    assert_eq_int(read_int32_be(packet, 1), packet.length() - 1)
+    assert_eq_str(packet.substring(5, packet.length() - 1), "SELECT 1")
+    assert_eq_int(__str_byte_at(packet, packet.length() - 1), 0)
+}
+
+fun test_startup_message_contains_protocol_and_parameters() {
+    let packet = startup_message("raven", "ravendb")
+    assert_eq_int(read_int32_be(packet, 0), packet.length())
+    assert_eq_int(read_int32_be(packet, 4), 196608)
+    assert_true(packet.contains("user".concat(chr(0)).concat("raven").concat(chr(0))))
+    assert_true(packet.contains("database".concat(chr(0)).concat("ravendb").concat(chr(0))))
+}
+
+fun test_parse_and_bind_messages() {
+    let parse = parse_message("SELECT $1::text")
+    assert_eq_int(__str_byte_at(parse, 0), 80)
+    assert_true(parse.contains("SELECT $1::text".concat(chr(0))))
+
+    let bind = bind_message(["hello", "42"])
+    assert_eq_int(__str_byte_at(bind, 0), 66)
+    assert_true(bind.contains(int32_be(5).concat("hello")))
+    assert_true(bind.contains(int32_be(2).concat("42")))
+}
+
+fun test_parse_error_fields() {
+    let payload = "SERROR".concat(chr(0))
+    payload = payload.concat("C42P01").concat(chr(0))
+    payload = payload.concat("Mrelation does not exist").concat(chr(0)).concat(chr(0))
+    let error = parse_error(payload)
+    assert_eq_str(error.kind(), "postgres")
+    assert_eq_str(error.message(), "ERROR 42P01: relation does not exist")
+}
+
+fun test_parse_row_description_names() {
+    let payload = int16_be(2)
+    payload = payload.concat("id").concat(chr(0)).concat(zeroes(18))
+    payload = payload.concat("display_name").concat(chr(0)).concat(zeroes(18))
+    let columns = parse_row_description(payload)
+    assert_eq_int(columns.len(), 2)
+    assert_eq_str(columns[0], "id")
+    assert_eq_str(columns[1], "display_name")
+}
+
+fun test_parse_data_row_distinguishes_null_and_empty() {
+    let payload = int16_be(3)
+    payload = payload.concat(int32_be(2)).concat("42")
+    payload = payload.concat(int32_be(4294967295))
+    payload = payload.concat(int32_be(0))
+    let row = parse_data_row(payload)
+    assert_eq_str(row.get(0), "42")
+    assert_true(row.is_null(1))
+    assert_eq_str(row.get(1), "")
+    assert_true(!row.is_null(2))
+    assert_eq_str(row.get(2), "")
+}
+
+fun test_parse_affected_command_tags() {
+    assert_eq_int(parse_affected("INSERT 0 7".concat(chr(0))), 7)
+    assert_eq_int(parse_affected("UPDATE 12".concat(chr(0))), 12)
+    assert_eq_int(parse_affected("DELETE 3".concat(chr(0))), 3)
+    assert_eq_int(parse_affected("CREATE TABLE".concat(chr(0))), 0)
+}
+
+fun test_digit_parser_rejects_non_digits() {
+    assert_eq_int(digits_to_int("12345"), 12345)
+    assert_eq_int(digits_to_int("12x"), 0)
+    assert_eq_int(digits_to_int(""), 0)
+}
