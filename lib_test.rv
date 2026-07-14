@@ -1,6 +1,6 @@
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg, assert_true }
-import "./lib" { bind_message, bind_message_optional, chr, digits_to_int, frame, int16_be, int32_be, parse_affected, parse_data_row, parse_error, parse_message, parse_row_description, read_int16_be, read_int32_be, startup_message }
+import "./lib" { bind_message, bind_message_optional, chr, digits_to_int, frame, int16_be, int32_be, parse_affected, parse_data_row, parse_error, parse_message, parse_parameter_status, parse_row_description, read_int16_be, read_int32_be, startup_message }
 
 fun zeroes(count: Int) -> String {
     let out = ""
@@ -59,6 +59,24 @@ fun test_parse_error_fields() {
     let error = parse_error(payload)
     assert_eq_str(error.kind(), "postgres")
     assert_eq_str(error.message(), "ERROR 42P01: relation does not exist")
+}
+
+fun test_parse_parameter_status() {
+    let payload = "server_version".concat(chr(0)).concat("16.9").concat(chr(0))
+    match parse_parameter_status(payload) {
+        Ok(status) -> {
+            assert_eq_str(status.name, "server_version")
+            assert_eq_str(status.value, "16.9")
+        },
+        Err(e) -> assert_msg(false, e.message()),
+    }
+}
+
+fun test_malformed_parameter_status_returns_error() {
+    match parse_parameter_status("server_version") {
+        Ok(status) -> assert_msg(false, "expected malformed status to fail"),
+        Err(e) -> assert_eq_str(e.message(), "malformed ParameterStatus message"),
+    }
 }
 
 fun test_parse_row_description_names() {
