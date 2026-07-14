@@ -171,6 +171,9 @@ fun read_message(stream: TcpStream) -> Result<Message, Error> {
     let header = read_exact(stream, 5)?
     let mtype = __str_byte_at(header, 0)
     let len = read_int32_be(header, 1)
+    if len < 4 {
+        return Err(error_kind("postgres", "invalid backend message length ${len}"))
+    }
     let payload = ""
     if len > 4 {
         payload = read_exact(stream, len - 4)?
@@ -306,6 +309,29 @@ fun parse_row_description(payload: String) -> List<String> {
     return cols
 }
 
+fun parse_row_description_checked(payload: String) -> Result<List<String>, Error> {
+    if payload.length() < 2 {
+        return Err(error_kind("postgres", "truncated RowDescription message"))
+    }
+    let cols: List<String> = []
+    let count = read_int16_be(payload, 0)
+    let off = 2
+    let i = 0
+    while i < count {
+        let end = find_nul(payload, off)
+        if end >= payload.length() || end + 1 + 18 > payload.length() {
+            return Err(error_kind("postgres", "truncated RowDescription field"))
+        }
+        cols.push(payload.substring(off, end))
+        off = end + 1 + 18
+        i = i + 1
+    }
+    if off != payload.length() {
+        return Err(error_kind("postgres", "RowDescription message has trailing data"))
+    }
+    return Ok(cols)
+}
+
 // DataRow: an int16 column count, then per column an int32 byte length (a length
 // of -1, encoded as 0xFFFFFFFF, means NULL) followed by that many text bytes.
 fun parse_data_row(payload: String) -> Row {
@@ -328,6 +354,40 @@ fun parse_data_row(payload: String) -> Row {
         i = i + 1
     }
     return Row { values, nulls }
+}
+
+fun parse_data_row_checked(payload: String) -> Result<Row, Error> {
+    if payload.length() < 2 {
+        return Err(error_kind("postgres", "truncated DataRow message"))
+    }
+    let values: List<String> = []
+    let nulls: List<Bool> = []
+    let count = read_int16_be(payload, 0)
+    let off = 2
+    let i = 0
+    while i < count {
+        if off + 4 > payload.length() {
+            return Err(error_kind("postgres", "truncated DataRow column length"))
+        }
+        let len = read_int32_be(payload, off)
+        off = off + 4
+        if len == 4294967295 {
+            values.push("")
+            nulls.push(true)
+        } else {
+            if off + len > payload.length() {
+                return Err(error_kind("postgres", "truncated DataRow column value"))
+            }
+            values.push(payload.substring(off, off + len))
+            nulls.push(false)
+            off = off + len
+        }
+        i = i + 1
+    }
+    if off != payload.length() {
+        return Err(error_kind("postgres", "DataRow message has trailing data"))
+    }
+    return Ok(Row { values, nulls })
 }
 
 // CommandComplete tag, e.g. "INSERT 0 5", "UPDATE 3", "SELECT 10". The affected
@@ -378,9 +438,9 @@ fun read_query_result(stream: TcpStream) -> Result<QueryResult, Error> {
     while !done {
         let msg = read_message(stream)?
         if msg.mtype == 84 {
-            columns = parse_row_description(msg.payload)
+            columns = parse_row_description_checked(msg.payload)?
         } else if msg.mtype == 68 {
-            rows.push(parse_data_row(msg.payload))
+            rows.push(parse_data_row_checked(msg.payload)?)
         } else if msg.mtype == 67 {
             affected = parse_affected(msg.payload)
         } else if msg.mtype == 69 {
