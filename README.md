@@ -1,5 +1,7 @@
 # raven-postgres
 
+[![CI](https://github.com/martian56/raven-postgres/actions/workflows/ci.yml/badge.svg)](https://github.com/martian56/raven-postgres/actions/workflows/ci.yml)
+
 A pure-Raven PostgreSQL client for the
 [Raven programming language](https://github.com/martian56/raven). It speaks
 the PostgreSQL v3 frontend/backend protocol over `std/net`; applications do
@@ -43,12 +45,12 @@ In `rv.toml`:
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-postgres" = "v0.1.0"
+"github.com/martian56/raven-postgres" = "v0.2.0"
 ```
 
 ## Quick start
 
-```raven
+```rust
 import std/io { println }
 import "github.com/martian56/raven-postgres" { connect }
 
@@ -83,7 +85,7 @@ See [`examples/basic.rv`](examples/basic.rv) for a complete runnable example.
 
 ### Connecting
 
-```raven
+```rust
 connect(host, port, user, password, database) -> Result<Connection, Error>
 connect_with_timeout(host, port, user, password, database, timeout_ms) -> Result<Connection, Error>
 ```
@@ -94,7 +96,7 @@ blocking socket I/O.
 
 An open `Connection` exposes startup metadata:
 
-```raven
+```rust
 println(conn.server_version)
 println("backend ${conn.backend_pid}")
 ```
@@ -122,7 +124,7 @@ automatically.
 Use `$1`, `$2`, and so on. Values travel in Bind messages and cannot change the
 statement's SQL syntax:
 
-```raven
+```rust
 let _ = conn.execute_params(
     "INSERT INTO users (name, age) VALUES ($1, $2)",
     [user_name, "42"],
@@ -139,7 +141,7 @@ Parameters use PostgreSQL's text format and have unspecified type OIDs, so the
 server infers types from columns, operators, or explicit casts. Add casts where
 the context is ambiguous:
 
-```raven
+```rust
 let result = conn.query_params(
     "SELECT $1::integer + $2::integer",
     ["20", "22"],
@@ -160,7 +162,7 @@ let result = conn.query_params(
 SQL `NULL` returns `""`, so use `Row.is_null(index)` to distinguish it from an
 actual empty string:
 
-```raven
+```rust
 if row.is_null(2) {
     println("no value")
 } else {
