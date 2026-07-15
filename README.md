@@ -6,7 +6,7 @@ the PostgreSQL v3 frontend/backend protocol over `std/net`; applications do
 not need `libpq`, a C compiler, or another native dependency.
 
 > Status: **v0.1.0**, ready for initial use and tested end to end against
-> PostgreSQL 16. See [Authentication and security](#authentication-and-security)
+> PostgreSQL 16.9 and 17.5. See [Authentication and security](#authentication-and-security)
 > before connecting outside a trusted development network.
 
 ## Features
@@ -23,13 +23,15 @@ not need `libpq`, a C compiler, or another native dependency.
 - Transactions through ordinary SQL (`BEGIN`, `COMMIT`, and `ROLLBACK`).
 - PostgreSQL severity and SQLSTATE values preserved in Raven `Error` results;
   connections remain reusable after statement and parameter errors.
+- Partial TCP writes are completed, while malformed or oversized backend
+  messages are rejected before allocation or parsing.
 - Server version, backend process ID, health checks, and configurable socket
   timeouts.
 - No native dependencies.
 
 ## Requirements
 
-- Raven 2.25.6 or newer.
+- Raven 2.26.1 or newer.
 - A PostgreSQL `pg_hba.conf` rule using `trust` or `password` authentication.
 
 The Docker environment included in this repository configures `password`
@@ -228,19 +230,24 @@ port from its default of `55432`.
 The live suite covers authentication failures, CRUD, generated IDs, affected
 rows, nullable and hostile parameters, transaction commit and rollback,
 constraint and cast errors, recovery after errors, Unicode, scalar types,
-multiple connections, 500-row results, a 262 KiB bound value, and a 17 MB
-field.
+multiple connections, 500-row results, a 262 KiB bound value, a 17 MB field,
+COPY rejection, NUL validation, and multiple-result draining. CI runs it
+against PostgreSQL 16.9 and 17.5.
 
 ## Compatibility and limits
 
-- Tested against PostgreSQL 16. The v3 protocol is stable across supported
-  PostgreSQL releases, but other versions are not yet in the automated matrix.
+- Tested against PostgreSQL 16.9 and 17.5.
 - MD5, SCRAM-SHA-256, TLS, Unix-domain sockets, cancellation, notifications,
-  COPY, connection pooling, and streaming cursors are not implemented yet.
+  connection pooling, and streaming cursors are not implemented yet.
+- COPY streaming is rejected explicitly. COPY IN is aborted and COPY OUT is
+  drained so the connection remains usable rather than hanging mid-copy.
 - Parameters and results use text format; typed binary codecs are not exposed.
 - `QueryResult` collects every row in memory.
-- The API models one result set. Avoid sending multiple SQL statements in one
-  `query` call.
+- A backend message is limited to 256 MiB to bound memory use with malformed or
+  hostile servers.
+- The API models one row result set. If a query produces a second row result,
+  raven-postgres drains it and returns a clear error rather than merging rows
+  with incompatible metadata.
 
 ## License
 
