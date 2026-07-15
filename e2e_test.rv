@@ -1,7 +1,7 @@
 import std/env { get_env_or, has_env }
 import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_msg, assert_true }
-import "./lib" { connect, Connection }
+import "./lib" { chr, connect, Connection }
 
 fun e2e_enabled() -> Bool {
     return has_env("RAVEN_POSTGRES_E2E")
@@ -422,6 +422,59 @@ fun test_e2e_parameter_error_keeps_connection_usable() {
     match conn.query_params("SELECT $1::integer", ["not-an-integer"]) {
         Ok(result) -> assert_msg(false, "expected invalid integer to fail"),
         Err(e) -> assert_msg(e.message().contains("22P02"), e.message()),
+    }
+    assert_true(must(conn.ping()))
+    conn.close()
+}
+
+fun test_e2e_copy_streams_are_rejected_without_losing_connection() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let _ = must(conn.execute("DROP TABLE IF EXISTS raven_postgres_copy"))
+    let _ = must(conn.execute("CREATE TABLE raven_postgres_copy (value TEXT)"))
+    match conn.query("COPY raven_postgres_copy FROM STDIN") {
+        Ok(result) -> assert_msg(false, "COPY FROM STDIN unexpectedly succeeded"),
+        Err(e) -> assert_msg(e.message().contains("COPY FROM STDIN is not supported"), e.message()),
+    }
+    assert_true(must(conn.ping()))
+    match conn.query("COPY (SELECT 'value') TO STDOUT") {
+        Ok(result) -> assert_msg(false, "COPY TO STDOUT unexpectedly succeeded"),
+        Err(e) -> assert_msg(e.message().contains("COPY streaming is not supported"), e.message()),
+    }
+    assert_true(must(conn.ping()))
+    let _ = must(conn.execute("DROP TABLE raven_postgres_copy"))
+    conn.close()
+}
+
+fun test_e2e_multiple_row_results_are_rejected_and_drained() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    match conn.query("SELECT 1; SELECT 2") {
+        Ok(result) -> assert_msg(false, "multiple row results unexpectedly merged"),
+        Err(e) -> assert_msg(e.message().contains("multiple row result sets"), e.message()),
+    }
+    assert_true(must(conn.ping()))
+    conn.close()
+}
+
+fun test_e2e_nul_inputs_fail_cleanly_and_connection_recovers() {
+    if !e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    let nul = chr(0)
+    match conn.query("SELECT 1".concat(nul).concat("; SELECT 2")) {
+        Ok(result) -> assert_msg(false, "NUL-containing SQL unexpectedly ran"),
+        Err(e) -> assert_msg(e.message().contains("SQL cannot contain a NUL byte"), e.message()),
+    }
+    assert_true(must(conn.ping()))
+    match conn.query_params("SELECT $1::text", ["before".concat(nul).concat("after")]) {
+        Ok(result) -> assert_msg(false, "PostgreSQL text unexpectedly accepted NUL"),
+        Err(e) -> assert_msg(e.message().contains("0x00"), e.message()),
     }
     assert_true(must(conn.ping()))
     conn.close()
