@@ -19,7 +19,7 @@ not need `libpq`, a C compiler, or another native dependency.
   `INSERT ... RETURNING` results.
 - Extended-protocol parameters with `$1`, `$2`, ... placeholders; values are
   sent separately and never interpolated into SQL.
-- Nullable parameters through `List<Option<String>>`.
+- Nullable parameters through `list[Option[str]]`.
 - Correct distinction between SQL `NULL` and an empty string.
 - UTF-8, large fields, large bound values, and hundreds of result rows.
 - Transactions through ordinary SQL (`BEGIN`, `COMMIT`, and `ROLLBACK`).
@@ -51,12 +51,12 @@ In `rv.toml`:
 ## Quick start
 
 ```rust
-import std/io { println }
-import "github.com/martian56/raven-postgres" { connect }
+from std.io import println
+from "github.com/martian56/raven-postgres" import connect
 
 fun main() {
     match connect("127.0.0.1", 5432, "raven", "ravenpw", "ravendb") {
-        Ok(conn) -> {
+        case Ok(conn) {
             let _ = conn.execute(
                 "CREATE TABLE IF NOT EXISTS pets (id BIGSERIAL PRIMARY KEY, name TEXT)",
             )
@@ -65,16 +65,16 @@ fun main() {
             let _ = conn.execute_params("INSERT INTO pets (name) VALUES ($1)", ["O'Brien"])
 
             match conn.query("SELECT id, name FROM pets ORDER BY id") {
-                Ok(result) -> {
+                case Ok(result) {
                     for row in result.rows {
                         println("${row.get(0)}: ${row.get(1)}")
                     }
-                },
-                Err(e) -> println("query failed: ${e.message()}"),
+                }
+                case Err(e) { println("query failed: ${e.message()}") }
             }
             conn.close()
-        },
-        Err(e) -> println("connect failed: ${e.message()}"),
+        }
+        case Err(e) { println("connect failed: ${e.message()}") }
     }
 }
 ```
@@ -86,8 +86,8 @@ See [`examples/basic.rv`](examples/basic.rv) for a complete runnable example.
 ### Connecting
 
 ```rust
-connect(host, port, user, password, database) -> Result<Connection, Error>
-connect_with_timeout(host, port, user, password, database, timeout_ms) -> Result<Connection, Error>
+connect(host, port, user, password, database) -> Result[Connection, Error]
+connect_with_timeout(host, port, user, password, database, timeout_ms) -> Result[Connection, Error]
 ```
 
 `connect` applies a 30-second read and write timeout. Use
@@ -107,15 +107,15 @@ automatically.
 
 ### Queries and writes
 
-- `query(sql) -> Result<QueryResult, Error>` sends a simple-protocol query and
+- `query(sql) -> Result[QueryResult, Error]` sends a simple-protocol query and
   collects its response.
-- `execute(sql) -> Result<Int, Error>` runs SQL and returns the affected-row
+- `execute(sql) -> Result[int, Error]` runs SQL and returns the affected-row
   count from the command tag.
 - `query_params(sql, params)` and `execute_params(sql, params)` bind a
-  `List<String>` through the extended query protocol.
+  `list[str]` through the extended query protocol.
 - `query_optional_params(sql, params)` and `execute_optional_params(sql,
   params)` accept `List<Option<String>>`; `None` binds SQL `NULL`.
-- `ping() -> Result<Bool, Error>` verifies the connection with `SELECT 1`.
+- `ping() -> Result[bool, Error]` verifies the connection with `SELECT 1`.
 - `set_timeout_ms(ms)` changes the read and write timeout for later commands.
 - `close()` terminates the session.
 
@@ -125,12 +125,9 @@ Use `$1`, `$2`, and so on. Values travel in Bind messages and cannot change the
 statement's SQL syntax:
 
 ```rust
-let _ = conn.execute_params(
-    "INSERT INTO users (name, age) VALUES ($1, $2)",
-    [user_name, "42"],
-)?
+let _ = conn.execute_params("INSERT INTO users (name, age) VALUES ($1, $2)", [user_name, "42"])?
 
-let nullable: List<Option<String>> = [Some(user_name), None]
+let nullable: list[Option[str]] = [Some(user_name), None]
 let _ = conn.execute_optional_params(
     "INSERT INTO profiles (name, biography) VALUES ($1, $2)",
     nullable,
@@ -142,21 +139,18 @@ server infers types from columns, operators, or explicit casts. Add casts where
 the context is ambiguous:
 
 ```rust
-let result = conn.query_params(
-    "SELECT $1::integer + $2::integer",
-    ["20", "22"],
-)?
+let result = conn.query_params("SELECT $1::integer + $2::integer", ["20", "22"])?
 ```
 
 ### Results
 
 `QueryResult` contains:
 
-- `columns: List<String>`: result column labels in order.
-- `rows: List<Row>`: all returned rows.
-- `affected: Int`: count parsed from command tags such as `INSERT 0 3`,
+- `columns: list[str]`: result column labels in order.
+- `rows: list[Row]`: all returned rows.
+- `affected: int`: count parsed from command tags such as `INSERT 0 3`,
   `UPDATE 2`, or `DELETE 1`.
-- `row_count() -> Int`: number of collected rows.
+- `row_count() -> int`: number of collected rows.
 
 `Row.get(index)` returns the zero-based value in PostgreSQL's text format. A
 SQL `NULL` returns `""`, so use `Row.is_null(index)` to distinguish it from an

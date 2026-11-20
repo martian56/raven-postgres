@@ -2,26 +2,26 @@
 // and handle an error. Edit the connection constants for your database, then:
 //
 //   docker compose up -d --wait
-//   raven build examples/basic.rv -o target/basic && ./target/basic
+//   raven build examples/basic.rv -o target/basic and ./target/basic
 //
 // (or `rvpm run` from a project that depends on this package).
 
-import std/io { println }
-import "../lib" { connect, Connection }
+from std.io import println
+from "../lib" import connect, Connection
 
-const HOST: String = "127.0.0.1"
-const PORT: Int = 55432
-const USER: String = "raven"
-const PASSWORD: String = "ravenpw"
-const DATABASE: String = "ravendb"
+let HOST: str = "127.0.0.1"
+let PORT: int = 55432
+let USER: str = "raven"
+let PASSWORD: str = "ravenpw"
+let DATABASE: str = "ravendb"
 
 fun main() {
     match connect(HOST, PORT, USER, PASSWORD, DATABASE) {
-        Ok(conn) -> {
+        case Ok(conn) {
             run(conn)
             conn.close()
-        },
-        Err(e) -> println("connect failed: ${e.message()}"),
+        }
+        case Err(e) { println("connect failed: ${e.message()}") }
     }
 }
 
@@ -30,43 +30,39 @@ fun run(conn: Connection) {
     let _ = conn.execute("CREATE TABLE pets (id SERIAL PRIMARY KEY, name TEXT, age INT)")
 
     match conn.execute("INSERT INTO pets (name, age) VALUES ('rex', 4), ('mia', 2), ('nil', NULL)") {
-        Ok(n) -> println("inserted ${n} rows"),
-        Err(e) -> println("insert failed: ${e.message()}"),
+        case Ok(n) { println("inserted ${n} rows") }
+        case Err(e) { println("insert failed: ${e.message()}") }
     }
 
     match conn.query("SELECT id, name, age FROM pets ORDER BY id") {
-        Ok(res) -> {
+        case Ok(res) {
             println("${res.columns[0]} | ${res.columns[1]} | ${res.columns[2]}")
             for row in res.rows {
-                let age = if row.is_null(2) {
-                    "NULL"
-                } else {
-                    row.get(2)
-                }
+                let age = "NULL" if row.is_null(2) else row.get(2)
                 println("${row.get(0)} | ${row.get(1)} | ${age}")
             }
-        },
-        Err(e) -> println("select failed: ${e.message()}"),
+        }
+        case Err(e) { println("select failed: ${e.message()}") }
     }
 
     // Parameterized: the value is bound over the wire, never spliced into SQL,
     // so user input (even a name with a quote) is safe.
     let _ = conn.execute_params("INSERT INTO pets (name, age) VALUES ($1, $2)", ["o'brien", "7"])
-    let nullable: List<Option<String>> = [Some("raven"), None]
+    let nullable: list[Option[str]] = [Some("raven"), None]
     let _ = conn.execute_optional_params("INSERT INTO pets (name, age) VALUES ($1, $2)", nullable)
     match conn.query_params("SELECT name FROM pets WHERE age > $1 ORDER BY age", ["3"]) {
-        Ok(res) -> {
+        case Ok(res) {
             for row in res.rows {
                 println("older than 3: ${row.get(0)}")
             }
-        },
-        Err(e) -> println("param query failed: ${e.message()}"),
+        }
+        case Err(e) { println("param query failed: ${e.message()}") }
     }
 
     // A failed statement returns an Err; the connection stays usable afterward.
     match conn.query("SELECT * FROM does_not_exist") {
-        Ok(res) -> println("unexpected success"),
-        Err(e) -> println("expected error: ${e.message()}"),
+        case Ok(res) { println("unexpected success") }
+        case Err(e) { println("expected error: ${e.message()}") }
     }
 
     let _ = conn.execute("DROP TABLE pets")
