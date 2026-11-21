@@ -33,7 +33,7 @@ not need `libpq`, a C compiler, or another native dependency.
 
 ## Requirements
 
-- Raven 2.26.1 or newer.
+- Raven 3.0.0 or newer.
 - A PostgreSQL `pg_hba.conf` rule using `trust` or `password` authentication.
 
 The Docker environment included in this repository configures `password`
