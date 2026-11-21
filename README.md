@@ -45,7 +45,7 @@ In `rv.toml`:
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-postgres" = "v0.2.0"
+"github.com/martian56/raven-postgres" = "v0.3.0"
 ```
 
 ## Quick start
