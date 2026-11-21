@@ -10,79 +10,79 @@
 // and return a clear error.
 //
 // Usage:
-//   import "github.com/martian56/raven-postgres" { connect }
+//   from "github.com/martian56/raven-postgres" import connect
 //   let conn = connect("127.0.0.1", 5432, "user", "pass", "mydb")?
 //   let res = conn.query("SELECT id, name FROM users")?
 //   for row in res.rows { println(row.get(0)) }
 //   conn.close()
 
-import std/net
-import std/net { TcpStream }
-import std/string
-import std/error { error_kind }
+import std.net
+from std.net import TcpStream
+import std.string
+from std.error import error_kind
 
-const MAX_MESSAGE_SIZE: Int = 268435456
-const MAX_BIND_PARAMETERS: Int = 65535
+let MAX_MESSAGE_SIZE: int = 268435456
+let MAX_BIND_PARAMETERS: int = 65535
 
 // ===== handle and result types =====
 
 // A live connection to a PostgreSQL server.
-struct Connection {
-    stream: TcpStream,
-    server_version: String,
-    backend_pid: Int,
+class Connection {
+    stream: TcpStream
+    server_version: str
+    backend_pid: int
 }
 
-struct ParameterStatus {
-    name: String,
-    value: String,
+class ParameterStatus {
+    name: str
+    value: str
 }
 
-struct SessionInfo {
-    server_version: String,
-    backend_pid: Int,
+class SessionInfo {
+    server_version: str
+    backend_pid: int
 }
 
 // One decoded backend message: a type byte and its raw payload bytes.
-struct Message {
-    mtype: Int,
-    payload: String,
+class Message {
+    mtype: int
+    payload: str
 }
 
 // A result row. Values are the text-format column values; `nulls[i]` is true
 // when column i was SQL NULL (and `values[i]` is the empty string).
-struct Row {
-    values: List<String>,
-    nulls: List<Bool>,
+class Row {
+    values: list[str]
+    nulls: list[bool]
 }
 
 // The result of a query: the column names from the row description, the rows,
 // and the affected-row count parsed from the command tag (INSERT/UPDATE/DELETE).
-struct QueryResult {
-    columns: List<String>,
-    rows: List<Row>,
-    affected: Int,
+class QueryResult {
+    columns: list[str]
+    rows: list[Row]
+    affected: int
 }
 
 // ===== byte toolkit =====
 
 // A one-byte string holding byte value `n` (low 8 bits).
-fun chr(n: Int) -> String {
+fun chr(n: int) -> str {
     return __str_from_byte(n & 255)
 }
 
 // `s` followed by a NUL terminator (a C string).
-fun cstr(s: String) -> String {
+fun cstr(s: str) -> str {
     return s.concat(chr(0))
 }
 
 // Big-endian 16-bit and 32-bit integers as 2 and 4 byte strings.
-fun int16_be(n: Int) -> String {
+fun int16_be(n: int) -> str {
     return chr((n >> 8) & 255).concat(chr(n & 255))
 }
 
-fun int32_be(n: Int) -> String {
-    let out = chr((n >> 24) & 255)
+fun int32_be(n: int) -> str {
+    var out = chr((n >> 24) & 255)
     out = out.concat(chr((n >> 16) & 255))
     out = out.concat(chr((n >> 8) & 255))
     out = out.concat(chr(n & 255))
@@ -90,11 +90,11 @@ fun int32_be(n: Int) -> String {
 }
 
 // Read big-endian integers out of a buffer at byte offset `off`.
-fun read_int16_be(s: String, off: Int) -> Int {
+fun read_int16_be(s: str, off: int) -> int {
     return (__str_byte_at(s, off) << 8) | __str_byte_at(s, off + 1)
 }
 
-fun read_int32_be(s: String, off: Int) -> Int {
+fun read_int32_be(s: str, off: int) -> int {
     let b0 = __str_byte_at(s, off)
     let b1 = __str_byte_at(s, off + 1)
     let b2 = __str_byte_at(s, off + 2)
@@ -103,8 +103,8 @@ fun read_int32_be(s: String, off: Int) -> Int {
 }
 
 // Index of the next NUL byte at or after `from`, or the length if none.
-fun find_nul(s: String, from: Int) -> Int {
-    let i = from
+fun find_nul(s: str, from: int) -> int {
+    var i = from
     let n = s.length()
     while i < n {
         if __str_byte_at(s, i) == 0 {
@@ -115,17 +115,17 @@ fun find_nul(s: String, from: Int) -> Int {
     return n
 }
 
-// Parse a run of ASCII digits into an Int; any non-digit yields 0.
-fun digits_to_int(s: String) -> Int {
+// Parse a run of ASCII digits into an int; any non-digit yields 0.
+fun digits_to_int(s: str) -> int {
     let n = s.length()
     if n == 0 {
         return 0
     }
-    let result = 0
-    let i = 0
+    var result = 0
+    var i = 0
     while i < n {
         let c = __str_byte_at(s, i)
-        if c >= 48 && c <= 57 {
+        if c >= 48 and c <= 57 {
             result = result * 10 + (c - 48)
         } else {
             return 0
@@ -135,11 +135,11 @@ fun digits_to_int(s: String) -> Int {
     return result
 }
 
-fun has_nul(value: String) -> Bool {
+fun has_nul(value: str) -> bool {
     return value.contains(chr(0))
 }
 
-fun validate_cstring(label: String, value: String) -> Result<Bool, Error> {
+fun validate_cstring(label: str, value: str) -> Result[bool, Error] {
     if has_nul(value) {
         return Err(error_kind("postgres", "${label} cannot contain a NUL byte"))
     }
@@ -150,14 +150,14 @@ fun validate_cstring(label: String, value: String) -> Result<Bool, Error> {
 
 // Build a typed frontend message: the type byte, an int32 length covering the
 // length field and the payload, then the payload.
-fun frame(mtype: String, payload: String) -> String {
+fun frame(mtype: str, payload: str) -> str {
     return mtype.concat(int32_be(4 + payload.length())).concat(payload)
 }
 
 // The startup packet (it has no type byte): protocol 3.0 then NUL-terminated
 // parameter key/value pairs, ending with an extra NUL.
-fun startup_message(user: String, database: String) -> String {
-    let body = int32_be(196608)
+fun startup_message(user: str, database: str) -> str {
+    var body = int32_be(196608)
     body = body.concat(cstr("user")).concat(cstr(user))
     body = body.concat(cstr("database")).concat(cstr(database))
     body = body.concat(chr(0))
@@ -166,9 +166,9 @@ fun startup_message(user: String, database: String) -> String {
 
 // Read exactly `n` bytes, looping until they all arrive. A clean EOF is an
 // error, since the protocol never closes mid-message.
-fun read_exact(stream: TcpStream, n: Int) -> Result<String, Error> {
-    let buf = ""
-    let have = 0
+fun read_exact(stream: TcpStream, n: int) -> Result[str, Error] {
+    var buf = ""
+    var have = 0
     while have < n {
         let chunk = stream.read(n - have)?
         if chunk.length() == 0 {
@@ -180,8 +180,8 @@ fun read_exact(stream: TcpStream, n: Int) -> Result<String, Error> {
     return Ok(buf)
 }
 
-fun write_all(stream: TcpStream, data: String) -> Result<Int, Error> {
-    let written = 0
+fun write_all(stream: TcpStream, data: str) -> Result[int, Error] {
+    var written = 0
     while written < data.length() {
         let count = stream.write(data.substring(written, data.length()))?
         if count <= 0 {
@@ -193,7 +193,7 @@ fun write_all(stream: TcpStream, data: String) -> Result<Int, Error> {
 }
 
 // Read one backend message: a 1-byte type, an int32 length, then the payload.
-fun read_message(stream: TcpStream) -> Result<Message, Error> {
+fun read_message(stream: TcpStream) -> Result[Message, Error] {
     let header = read_exact(stream, 5)?
     let mtype = __str_byte_at(header, 0)
     let len = read_int32_be(header, 1)
@@ -203,11 +203,11 @@ fun read_message(stream: TcpStream) -> Result<Message, Error> {
     if len > MAX_MESSAGE_SIZE {
         return Err(error_kind("postgres", "backend message exceeds the 256 MiB safety limit"))
     }
-    let payload = ""
+    var payload = ""
     if len > 4 {
         payload = read_exact(stream, len - 4)?
     }
-    return Ok(Message { mtype, payload })
+    return Ok(Message(mtype: mtype, payload: payload))
 }
 
 // ===== extended query protocol (parameterized statements) =====
@@ -218,7 +218,7 @@ fun read_message(stream: TcpStream) -> Result<Message, Error> {
 
 // Parse: an unnamed prepared statement for `sql` with no declared parameter
 // types (the server infers them).
-fun parse_message(sql: String) -> String {
+fun parse_message(sql: str) -> str {
     let payload = cstr("").concat(cstr(sql)).concat(int16_be(0))
     return frame("P", payload)
 }
@@ -226,45 +226,45 @@ fun parse_message(sql: String) -> String {
 // Bind the unnamed portal to the unnamed statement, all parameters and results
 // in text format. A NULL parameter is sent as length -1; here every value is a
 // non-null string.
-fun bind_message_optional(params: List<Option<String>>) -> String {
-    let payload = cstr("").concat(cstr(""))
+fun bind_message_optional(params: list[Option[str]]) -> str {
+    var payload = cstr("").concat(cstr(""))
     payload = payload.concat(int16_be(0))
     payload = payload.concat(int16_be(params.len()))
     for p in params {
         match p {
-            Some(value) -> {
+            case Some(value) {
                 payload = payload.concat(int32_be(value.length())).concat(value)
-            },
-            None -> {
+            }
+            case None {
                 payload = payload.concat(int32_be(4294967295))
-            },
+            }
         }
     }
     payload = payload.concat(int16_be(0))
     return frame("B", payload)
 }
 
-fun validate_bind_params(params: List<Option<String>>) -> Result<Bool, Error> {
+fun validate_bind_params(params: list[Option[str]]) -> Result[bool, Error] {
     if params.len() > MAX_BIND_PARAMETERS {
         return Err(error_kind("postgres", "too many bind parameters; maximum is 65535"))
     }
     for param in params {
         match param {
-            Some(value) -> {
+            case Some(value) {
                 if value.length() > 2147483647 {
                     return Err(error_kind("postgres", "bind parameter exceeds the protocol limit"))
                 }
-            },
-            None -> {},
+            }
+            case None {}
         }
     }
     return Ok(true)
 }
 
-fun extended_query(sql: String, params: List<Option<String>>) -> Result<String, Error> {
+fun extended_query(sql: str, params: list[Option[str]]) -> Result[str, Error] {
     let _ = validate_cstring("SQL", sql)?
     let _ = validate_bind_params(params)?
-    let batch = parse_message(sql)
+    var batch = parse_message(sql)
     batch = batch.concat(bind_message_optional(params))
     batch = batch.concat(describe_portal_message())
     batch = batch.concat(execute_message())
@@ -272,30 +272,30 @@ fun extended_query(sql: String, params: List<Option<String>>) -> Result<String, 
     return Ok(batch)
 }
 
-fun text_params(params: List<String>) -> List<Option<String>> {
-    let out: List<Option<String>> = []
+fun text_params(params: list[str]) -> list[Option[str]] {
+    let out: list[Option[str]] = []
     for value in params {
         out.push(Some(value))
     }
     return out
 }
 
-fun bind_message(params: List<String>) -> String {
+fun bind_message(params: list[str]) -> str {
     return bind_message_optional(text_params(params))
 }
 
 // Describe the unnamed portal, so the server returns a RowDescription.
-fun describe_portal_message() -> String {
+fun describe_portal_message() -> str {
     return frame("D", chr(80).concat(cstr("")))
 }
 
 // Execute the unnamed portal with no row limit.
-fun execute_message() -> String {
+fun execute_message() -> str {
     return frame("E", cstr("").concat(int32_be(0)))
 }
 
 // Sync: end the batch and ask for ReadyForQuery.
-fun sync_message() -> String {
+fun sync_message() -> str {
     return frame("S", "")
 }
 
@@ -303,12 +303,12 @@ fun sync_message() -> String {
 
 // An ErrorResponse / NoticeResponse payload: typed, NUL-terminated fields ended
 // by a zero type byte. We surface severity, SQLSTATE code, and message.
-fun parse_error(payload: String) -> Error {
-    let off = 0
+fun parse_error(payload: str) -> Error {
+    var off = 0
     let n = payload.length()
-    let message = ""
-    let code = ""
-    let severity = ""
+    var message = ""
+    var code = ""
+    var severity = ""
     while off < n {
         let ftype = __str_byte_at(payload, off)
         if ftype == 0 {
@@ -332,7 +332,7 @@ fun parse_error(payload: String) -> Error {
     return error_kind("postgres", "${severity} ${code}: ${message}")
 }
 
-fun parse_parameter_status(payload: String) -> Result<ParameterStatus, Error> {
+fun parse_parameter_status(payload: str) -> Result[ParameterStatus, Error] {
     let name_end = find_nul(payload, 0)
     if name_end >= payload.length() {
         return Err(error_kind("postgres", "malformed ParameterStatus message"))
@@ -346,20 +346,20 @@ fun parse_parameter_status(payload: String) -> Result<ParameterStatus, Error> {
         return Err(error_kind("postgres", "ParameterStatus message has trailing data"))
     }
     return Ok(
-        ParameterStatus {
+        ParameterStatus(
             name: payload.substring(0, name_end),
             value: payload.substring(value_start, value_end),
-        },
+        ),
     )
 }
 
 // RowDescription: an int16 field count, then per field a NUL-terminated name
 // followed by 18 bytes of OID/length/format metadata we skip.
-fun parse_row_description(payload: String) -> List<String> {
-    let cols: List<String> = []
+fun parse_row_description(payload: str) -> list[str] {
+    let cols: list[str] = []
     let count = read_int16_be(payload, 0)
-    let off = 2
-    let i = 0
+    var off = 2
+    var i = 0
     while i < count {
         let end = find_nul(payload, off)
         cols.push(payload.substring(off, end))
@@ -369,17 +369,17 @@ fun parse_row_description(payload: String) -> List<String> {
     return cols
 }
 
-fun parse_row_description_checked(payload: String) -> Result<List<String>, Error> {
+fun parse_row_description_checked(payload: str) -> Result[list[str], Error] {
     if payload.length() < 2 {
         return Err(error_kind("postgres", "truncated RowDescription message"))
     }
-    let cols: List<String> = []
+    let cols: list[str] = []
     let count = read_int16_be(payload, 0)
-    let off = 2
-    let i = 0
+    var off = 2
+    var i = 0
     while i < count {
         let end = find_nul(payload, off)
-        if end >= payload.length() || end + 1 + 18 > payload.length() {
+        if end >= payload.length() or end + 1 + 18 > payload.length() {
             return Err(error_kind("postgres", "truncated RowDescription field"))
         }
         cols.push(payload.substring(off, end))
@@ -394,12 +394,12 @@ fun parse_row_description_checked(payload: String) -> Result<List<String>, Error
 
 // DataRow: an int16 column count, then per column an int32 byte length (a length
 // of -1, encoded as 0xFFFFFFFF, means NULL) followed by that many text bytes.
-fun parse_data_row(payload: String) -> Row {
-    let values: List<String> = []
-    let nulls: List<Bool> = []
+fun parse_data_row(payload: str) -> Row {
+    let values: list[str] = []
+    let nulls: list[bool] = []
     let count = read_int16_be(payload, 0)
-    let off = 2
-    let i = 0
+    var off = 2
+    var i = 0
     while i < count {
         let len = read_int32_be(payload, off)
         off = off + 4
@@ -413,18 +413,18 @@ fun parse_data_row(payload: String) -> Row {
         }
         i = i + 1
     }
-    return Row { values, nulls }
+    return Row(values: values, nulls: nulls)
 }
 
-fun parse_data_row_checked(payload: String) -> Result<Row, Error> {
+fun parse_data_row_checked(payload: str) -> Result[Row, Error] {
     if payload.length() < 2 {
         return Err(error_kind("postgres", "truncated DataRow message"))
     }
-    let values: List<String> = []
-    let nulls: List<Bool> = []
+    let values: list[str] = []
+    let nulls: list[bool] = []
     let count = read_int16_be(payload, 0)
-    let off = 2
-    let i = 0
+    var off = 2
+    var i = 0
     while i < count {
         if off + 4 > payload.length() {
             return Err(error_kind("postgres", "truncated DataRow column length"))
@@ -447,16 +447,16 @@ fun parse_data_row_checked(payload: String) -> Result<Row, Error> {
     if off != payload.length() {
         return Err(error_kind("postgres", "DataRow message has trailing data"))
     }
-    return Ok(Row { values, nulls })
+    return Ok(Row(values: values, nulls: nulls))
 }
 
 // CommandComplete tag, e.g. "INSERT 0 5", "UPDATE 3", "SELECT 10". The affected
 // count is the last whitespace-separated token when it is numeric, else 0.
-fun parse_affected(payload: String) -> Int {
+fun parse_affected(payload: str) -> int {
     let end = find_nul(payload, 0)
     let tag = payload.substring(0, end)
-    let i = tag.length() - 1
-    let start = 0
+    var i = tag.length() - 1
+    var start = 0
     while i >= 0 {
         if __str_byte_at(tag, i) == 32 {
             start = i + 1
@@ -471,17 +471,17 @@ fun parse_affected(payload: String) -> Int {
 // After an error mid-exchange, read until ReadyForQuery so the connection can be
 // reused. Best effort: any read failure just ends the drain.
 fun drain_until_ready(stream: TcpStream) {
-    let done = false
-    while !done {
+    var done = false
+    while not done {
         match read_message(stream) {
-            Ok(msg) -> {
+            case Ok(msg) {
                 if msg.mtype == 90 {
                     done = true
                 }
-            },
-            Err(e) -> {
+            }
+            case Err(e) {
                 done = true
-            },
+            }
         }
     }
 }
@@ -490,13 +490,13 @@ fun drain_until_ready(stream: TcpStream) {
 // simple and extended query paths; both produce the same T/D/C/E/Z stream, and
 // the ParseComplete/BindComplete/ParameterDescription/NoData messages the
 // extended path adds are simply ignored here.
-fun read_query_result(stream: TcpStream) -> Result<QueryResult, Error> {
-    let columns: List<String> = []
-    let rows: List<Row> = []
-    let affected = 0
-    let saw_description = false
-    let done = false
-    while !done {
+fun read_query_result(stream: TcpStream) -> Result[QueryResult, Error] {
+    var columns: list[str] = []
+    let rows: list[Row] = []
+    var affected = 0
+    var saw_description = false
+    var done = false
+    while not done {
         let msg = read_message(stream)?
         if msg.mtype == 84 {
             if saw_description {
@@ -506,7 +506,7 @@ fun read_query_result(stream: TcpStream) -> Result<QueryResult, Error> {
             columns = parse_row_description_checked(msg.payload)?
             saw_description = true
         } else if msg.mtype == 68 {
-            if !saw_description {
+            if not saw_description {
                 drain_until_ready(stream)
                 return Err(error_kind("postgres", "DataRow arrived before RowDescription"))
             }
@@ -534,15 +534,15 @@ fun read_query_result(stream: TcpStream) -> Result<QueryResult, Error> {
             )?
             drain_until_ready(stream)
             return Err(error_kind("postgres", "COPY FROM STDIN is not supported"))
-        } else if msg.mtype == 72 || msg.mtype == 87 {
+        } else if msg.mtype == 72 or msg.mtype == 87 {
             drain_until_ready(stream)
             return Err(error_kind("postgres", "COPY streaming is not supported"))
         }
     }
-    return Ok(QueryResult { columns, rows, affected })
+    return Ok(QueryResult(columns: columns, rows: rows, affected: affected))
 }
 
-fun authentication_method(payload: String) -> Result<Int, Error> {
+fun authentication_method(payload: str) -> Result[int, Error] {
     if payload.length() < 4 {
         return Err(error_kind("postgres", "malformed AuthenticationRequest message"))
     }
@@ -550,11 +550,11 @@ fun authentication_method(payload: String) -> Result<Int, Error> {
 }
 
 // Run the startup authentication loop until ReadyForQuery.
-fun authenticate(stream: TcpStream, password: String) -> Result<SessionInfo, Error> {
-    let server_version = ""
-    let backend_pid = 0
-    let done = false
-    while !done {
+fun authenticate(stream: TcpStream, password: str) -> Result[SessionInfo, Error] {
+    var server_version = ""
+    var backend_pid = 0
+    var done = false
+    while not done {
         let msg = read_message(stream)?
         if msg.mtype == 82 {
             let auth = authentication_method(msg.payload)?
@@ -589,81 +589,81 @@ fun authenticate(stream: TcpStream, password: String) -> Result<SessionInfo, Err
             done = true
         }
     }
-    return Ok(SessionInfo { server_version, backend_pid })
+    return Ok(SessionInfo(server_version: server_version, backend_pid: backend_pid))
 }
 
 // ===== public API =====
 
 fun establish_connection(
     stream: TcpStream,
-    user: String,
-    password: String,
-    database: String,
-) -> Result<Connection, Error> {
+    user: str,
+    password: str,
+    database: str,
+) -> Result[Connection, Error] {
     let _ = validate_cstring("user", user)?
     let _ = validate_cstring("database", database)?
     let _ = validate_cstring("password", password)?
     let _ = write_all(stream, startup_message(user, database))?
     let session = authenticate(stream, password)?
     return Ok(
-        Connection {
-            stream,
+        Connection(
+            stream: stream,
             server_version: session.server_version,
             backend_pid: session.backend_pid,
-        },
+        ),
     )
 }
 
 // Connect with a read/write timeout for authentication and later commands.
 // A non-positive timeout restores blocking socket behavior.
 fun connect_with_timeout(
-    host: String,
-    port: Int,
-    user: String,
-    password: String,
-    database: String,
-    timeout_ms: Int,
-) -> Result<Connection, Error> {
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    timeout_ms: int,
+) -> Result[Connection, Error] {
     let stream = net.connect("${host}:${port}")?
     stream.set_read_timeout_ms(timeout_ms)
     stream.set_write_timeout_ms(timeout_ms)
     return match establish_connection(stream, user, password, database) {
-        Ok(connection) -> Ok(connection),
-        Err(e) -> {
+        case Ok(connection) { Ok(connection) }
+        case Err(e) {
             stream.close()
             Err(e)
-        },
+        }
     }
 }
 
 // Connect to a PostgreSQL server and authenticate. `host` is a name or IP,
 // `port` the TCP port (usually 5432). A 30-second socket timeout is applied.
 fun connect(
-    host: String,
-    port: Int,
-    user: String,
-    password: String,
-    database: String,
-) -> Result<Connection, Error> {
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+) -> Result[Connection, Error] {
     return connect_with_timeout(host, port, user, password, database, 30000)
 }
 
 impl Connection {
     // Change the read and write timeout used by later commands.
-    fun set_timeout_ms(self, timeout_ms: Int) {
+    fun set_timeout_ms(self, timeout_ms: int) {
         self.stream.set_read_timeout_ms(timeout_ms)
         self.stream.set_write_timeout_ms(timeout_ms)
     }
 
     // Verify that the server accepts a query on this connection.
-    fun ping(self) -> Result<Bool, Error> {
+    fun ping(self) -> Result[bool, Error] {
         let result = self.query("SELECT 1")?
-        return Ok(result.row_count() == 1 && result.rows[0].get(0) == "1")
+        return Ok(result.row_count() == 1 and result.rows[0].get(0) == "1")
     }
 
     // Run a SQL statement and collect its result. Works for any statement: a
     // SELECT fills `columns` and `rows`, a write fills `affected`.
-    fun query(self, sql: String) -> Result<QueryResult, Error> {
+    fun query(self, sql: str) -> Result[QueryResult, Error] {
         let _ = validate_cstring("SQL", sql)?
         let _ = write_all(self.stream, frame("Q", cstr(sql)))?
         return read_query_result(self.stream)
@@ -673,7 +673,7 @@ impl Connection {
     // Values are passed as text and never interpolated into the SQL, so this is
     // the safe way to pass user input. Types are inferred from context (column
     // types, casts), e.g. "INSERT INTO t (n) VALUES ($1)" or "... WHERE id = $1".
-    fun query_params(self, sql: String, params: List<String>) -> Result<QueryResult, Error> {
+    fun query_params(self, sql: str, params: list[str]) -> Result[QueryResult, Error] {
         let batch = extended_query(sql, text_params(params))?
         let _ = write_all(self.stream, batch)?
         return read_query_result(self.stream)
@@ -682,32 +682,28 @@ impl Connection {
     // Parameterized query variant that can bind SQL NULL with `None`.
     fun query_optional_params(
         self,
-        sql: String,
-        params: List<Option<String>>,
-    ) -> Result<QueryResult, Error> {
+        sql: str,
+        params: list[Option[str]],
+    ) -> Result[QueryResult, Error] {
         let batch = extended_query(sql, params)?
         let _ = write_all(self.stream, batch)?
         return read_query_result(self.stream)
     }
 
     // Run a statement and return just the affected-row count.
-    fun execute(self, sql: String) -> Result<Int, Error> {
+    fun execute(self, sql: str) -> Result[int, Error] {
         let res = self.query(sql)?
         return Ok(res.affected)
     }
 
     // Run a parameterized statement and return just the affected-row count.
-    fun execute_params(self, sql: String, params: List<String>) -> Result<Int, Error> {
+    fun execute_params(self, sql: str, params: list[str]) -> Result[int, Error] {
         let res = self.query_params(sql, params)?
         return Ok(res.affected)
     }
 
     // Parameterized write variant that can bind SQL NULL with `None`.
-    fun execute_optional_params(
-        self,
-        sql: String,
-        params: List<Option<String>>,
-    ) -> Result<Int, Error> {
+    fun execute_optional_params(self, sql: str, params: list[Option[str]]) -> Result[int, Error] {
         let res = self.query_optional_params(sql, params)?
         return Ok(res.affected)
     }
@@ -722,19 +718,19 @@ impl Connection {
 impl Row {
     // Text value of column `i`. Empty string when the column is NULL; check
     // `is_null` to tell an empty string from a NULL.
-    fun get(self, i: Int) -> String {
+    fun get(self, i: int) -> str {
         return self.values[i]
     }
 
     // Whether column `i` was SQL NULL.
-    fun is_null(self, i: Int) -> Bool {
+    fun is_null(self, i: int) -> bool {
         return self.nulls[i]
     }
 }
 
 impl QueryResult {
     // Number of rows returned.
-    fun row_count(self) -> Int {
+    fun row_count(self) -> int {
         return self.rows.len()
     }
 }
