@@ -194,7 +194,23 @@ fun write_all(stream: TcpStream, data: str) -> Result[int, Error] {
 
 // Read one backend message: a 1-byte type, an int32 length, then the payload.
 fun read_message(stream: TcpStream) -> Result[Message, Error] {
+    return read_message_after(read_exact(stream, 5)?, stream)
+}
+
+let NOT_POSTGRES = "the server did not answer as PostgreSQL (is this the right host and port?)"
+
+// The first reply to a startup message is always Authentication (R) or an
+// ErrorResponse (E); anything else means the port is not a Postgres server.
+fun read_first_message(stream: TcpStream) -> Result[Message, Error] {
     let header = read_exact(stream, 5)?
+    let mtype = __str_byte_at(header, 0)
+    if mtype != 82 and mtype != 69 {
+        return Err(error_kind("postgres", NOT_POSTGRES))
+    }
+    return read_message_after(header, stream)
+}
+
+fun read_message_after(header: str, stream: TcpStream) -> Result[Message, Error] {
     let mtype = __str_byte_at(header, 0)
     let len = read_int32_be(header, 1)
     if len < 4 {
@@ -554,8 +570,10 @@ fun authenticate(stream: TcpStream, password: str) -> Result[SessionInfo, Error]
     var server_version = ""
     var backend_pid = 0
     var done = false
+    var first = true
     while not done {
-        let msg = read_message(stream)?
+        let msg = read_first_message(stream)? if first else read_message(stream)?
+        first = false
         if msg.mtype == 82 {
             let auth = authentication_method(msg.payload)?
             if auth == 0 {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-11-22
+
+- Report a plain "the server did not answer as PostgreSQL" error when the port runs something else, instead of a message size error.
+
 ## 0.3.0 - 2026-11-21
 
 - Ported to Raven 3 syntax; requires Raven 3.0.1 or newer.
