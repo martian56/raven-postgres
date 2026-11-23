@@ -142,6 +142,25 @@ the context is ambiguous:
 let result = conn.query_params("SELECT $1::integer + $2::integer", ["20", "22"])?
 ```
 
+### Prepared statements
+
+Each connection prepares parameterized SQL once, as a named statement, and
+reuses it on later calls with the same SQL text. The server then skips parsing
+and, after a few executions, can switch to a cached generic plan. Up to 512
+statements are kept per connection; beyond that, queries run unprepared.
+
+If a schema change alters a cached statement's result columns, or the session
+runs `DEALLOCATE ALL` or `DISCARD ALL`, the next call prepares the statement
+again and retries once. Inside a transaction the original error is returned,
+because PostgreSQL has already aborted the transaction.
+
+Behind a pooler in transaction mode (PgBouncer's default), later commands can
+reach a different server session, so turn the cache off:
+
+```rust
+conn.set_statement_cache(false)
+```
+
 ### Results
 
 `QueryResult` contains:

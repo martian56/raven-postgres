@@ -1,6 +1,6 @@
 [package]
 name = "raven-postgres"
-version = "0.3.1"
+version = "0.4.0"
 edition = "v3"
 
 # A pure-Raven PostgreSQL client using the v3 wire protocol over std/net.

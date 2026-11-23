@@ -1,5 +1,6 @@
 import std.string
 from std.test import assert_eq_int, assert_eq_str, assert_msg, assert_true
+from "./lib" import bind_statement_message, extended_query_named, parse_named_message
 from "./lib" import authentication_method, bind_message, bind_message_optional, chr, digits_to_int, frame, int16_be, int32_be, parse_affected, parse_data_row, parse_data_row_checked, parse_error, parse_message, parse_parameter_status, parse_row_description, parse_row_description_checked, read_int16_be, read_int32_be, startup_message, validate_bind_params, validate_cstring
 
 fun zeroes(count: int) -> str {
@@ -164,5 +165,16 @@ fun test_cstring_and_bind_parameter_limits_are_validated() {
     match validate_bind_params(params) {
         case Ok(valid) { assert_msg(false, "oversized bind list unexpectedly validated") }
         case Err(e) { assert_eq_str(e.message(), "too many bind parameters; maximum is 65535") }
+    }
+}
+
+fun test_named_statement_messages() {
+    let parse = parse_named_message("rvpg_1", "SELECT $1")
+    assert_true(parse.contains("rvpg_1".concat(chr(0)).concat("SELECT $1").concat(chr(0))))
+    let bind = bind_statement_message("rvpg_1", [Some("x")])
+    assert_true(bind.contains(chr(0).concat("rvpg_1").concat(chr(0))))
+    match extended_query_named("rvpg_1", false, "SELECT $1", [Some("x")]) {
+        case Ok(batch) { assert_eq_int(__str_byte_at(batch, 0), 66) }
+        case Err(e) { assert_msg(false, e.message()) }
     }
 }
