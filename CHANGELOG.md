@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0 - 2026-11-23
+
+- Cache parameterized queries as named prepared statements per connection, so repeated queries skip parsing and can use a generic plan. A stale statement is prepared again and retried once. `set_statement_cache(false)` turns it off for transaction-mode poolers, and `cached_statements()` reports the count.
+
 ## 0.3.1 - 2026-11-22
 
 - Report a plain "the server did not answer as PostgreSQL" error when the port runs something else, instead of a message size error.
