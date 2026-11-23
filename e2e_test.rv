@@ -483,3 +483,66 @@ fun test_e2e_nul_inputs_fail_cleanly_and_connection_recovers() {
     assert_true(must(conn.ping()))
     conn.close()
 }
+
+fun test_e2e_statement_cache_reuses_prepared_statements() {
+    if not e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    for i in range(5) {
+        let r = must(conn.query_params("SELECT $1::int + 1 AS n", ["${i}"]))
+        assert_eq_str(r.rows[0].get(0), "${i + 1}")
+    }
+    assert_eq_int(conn.cached_statements(), 1)
+    let named = must(conn.query("SELECT count(*) FROM pg_prepared_statements"))
+    assert_eq_str(named.rows[0].get(0), "1")
+    conn.close()
+}
+
+fun test_e2e_statement_cache_keeps_statement_after_bind_error() {
+    if not e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    match conn.query_params("SELECT $1::int AS n", ["not a number"]) {
+        case Ok(r) { assert_msg(false, "expected a bind error") }
+        case Err(e) { assert_true(e.message().contains("22P02")) }
+    }
+    assert_eq_int(conn.cached_statements(), 1)
+    let r = must(conn.query_params("SELECT $1::int AS n", ["7"]))
+    assert_eq_str(r.rows[0].get(0), "7")
+    conn.close()
+}
+
+fun test_e2e_statement_cache_survives_schema_change_and_deallocate() {
+    if not e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    must(conn.execute("DROP TABLE IF EXISTS raven_pg_cache"))
+    must(conn.execute("CREATE TABLE raven_pg_cache (id INT)"))
+    must(conn.execute("INSERT INTO raven_pg_cache VALUES (1)"))
+    let sql = "SELECT * FROM raven_pg_cache WHERE id = $1"
+    assert_eq_int(must(conn.query_params(sql, ["1"])).columns.len(), 1)
+    must(conn.execute("ALTER TABLE raven_pg_cache ADD COLUMN name TEXT DEFAULT 'x'"))
+    let widened = must(conn.query_params(sql, ["1"]))
+    assert_eq_int(widened.columns.len(), 2)
+    must(conn.execute("DEALLOCATE ALL"))
+    assert_eq_str(must(conn.query_params(sql, ["1"])).rows[0].get(1), "x")
+    must(conn.execute("DROP TABLE raven_pg_cache"))
+    conn.close()
+}
+
+fun test_e2e_statement_cache_can_be_disabled() {
+    if not e2e_enabled() {
+        return
+    }
+    let conn = open_test_db()
+    conn.set_statement_cache(false)
+    let r = must(conn.query_params("SELECT $1::text AS v", ["plain"]))
+    assert_eq_str(r.rows[0].get(0), "plain")
+    assert_eq_int(conn.cached_statements(), 0)
+    let named = must(conn.query("SELECT count(*) FROM pg_prepared_statements"))
+    assert_eq_str(named.rows[0].get(0), "0")
+    conn.close()
+}

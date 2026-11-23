@@ -23,14 +23,20 @@ from std.error import error_kind
 
 let MAX_MESSAGE_SIZE: int = 268435456
 let MAX_BIND_PARAMETERS: int = 65535
+let MAX_CACHED_STATEMENTS: int = 512
 
 // ===== handle and result types =====
 
 // A live connection to a PostgreSQL server.
+// Parameterized SQL is prepared once per connection as a named statement and
+// reused, so the server skips parsing and can settle on a generic plan.
 class Connection {
     stream: TcpStream
     server_version: str
     backend_pid: int
+    statements: dict[str, str]
+    next_statement: int
+    cache_statements: bool
 }
 
 class ParameterStatus {
@@ -235,7 +241,11 @@ fun read_message_after(header: str, stream: TcpStream) -> Result[Message, Error]
 // Parse: an unnamed prepared statement for `sql` with no declared parameter
 // types (the server infers them).
 fun parse_message(sql: str) -> str {
-    let payload = cstr("").concat(cstr(sql)).concat(int16_be(0))
+    return parse_named_message("", sql)
+}
+
+fun parse_named_message(name: str, sql: str) -> str {
+    let payload = cstr(name).concat(cstr(sql)).concat(int16_be(0))
     return frame("P", payload)
 }
 
@@ -243,7 +253,11 @@ fun parse_message(sql: str) -> str {
 // in text format. A NULL parameter is sent as length -1; here every value is a
 // non-null string.
 fun bind_message_optional(params: list[Option[str]]) -> str {
-    var payload = cstr("").concat(cstr(""))
+    return bind_statement_message("", params)
+}
+
+fun bind_statement_message(statement: str, params: list[Option[str]]) -> str {
+    var payload = cstr("").concat(cstr(statement))
     payload = payload.concat(int16_be(0))
     payload = payload.concat(int16_be(params.len()))
     for p in params {
@@ -278,10 +292,24 @@ fun validate_bind_params(params: list[Option[str]]) -> Result[bool, Error] {
 }
 
 fun extended_query(sql: str, params: list[Option[str]]) -> Result[str, Error] {
+    return extended_query_named("", true, sql, params)
+}
+
+// The batch for `sql` bound to statement `name`; `parse` is false when the
+// statement already exists on the connection.
+fun extended_query_named(
+    name: str,
+    parse: bool,
+    sql: str,
+    params: list[Option[str]],
+) -> Result[str, Error] {
     let _ = validate_cstring("SQL", sql)?
     let _ = validate_bind_params(params)?
-    var batch = parse_message(sql)
-    batch = batch.concat(bind_message_optional(params))
+    var batch = ""
+    if parse {
+        batch = parse_named_message(name, sql)
+    }
+    batch = batch.concat(bind_statement_message(name, params))
     batch = batch.concat(describe_portal_message())
     batch = batch.concat(execute_message())
     batch = batch.concat(sync_message())
@@ -507,6 +535,17 @@ fun drain_until_ready(stream: TcpStream) {
 // the ParseComplete/BindComplete/ParameterDescription/NoData messages the
 // extended path adds are simply ignored here.
 fun read_query_result(stream: TcpStream) -> Result[QueryResult, Error] {
+    return read_query_result_tracking(stream, ParseState(complete: false))
+}
+
+class ParseState {
+    complete: bool
+}
+
+// Like read_query_result, also recording whether the server sent
+// ParseComplete, which means a named statement now exists even if a later
+// step of the batch failed.
+fun read_query_result_tracking(stream: TcpStream, parse: ParseState) -> Result[QueryResult, Error] {
     var columns: list[str] = []
     let rows: list[Row] = []
     var affected = 0
@@ -514,7 +553,9 @@ fun read_query_result(stream: TcpStream) -> Result[QueryResult, Error] {
     var done = false
     while not done {
         let msg = read_message(stream)?
-        if msg.mtype == 84 {
+        if msg.mtype == 49 {
+            parse.complete = true
+        } else if msg.mtype == 84 {
             if saw_description {
                 drain_until_ready(stream)
                 return Err(error_kind("postgres", "multiple row result sets are not supported"))
@@ -610,6 +651,13 @@ fun authenticate(stream: TcpStream, password: str) -> Result[SessionInfo, Error]
     return Ok(SessionInfo(server_version: server_version, backend_pid: backend_pid))
 }
 
+// The server dropped or invalidated a cached statement: a schema change altered
+// its result columns, or the session ran DEALLOCATE or DISCARD.
+fun stale_statement(e: Error) -> bool {
+    let message = e.message
+    return message.starts_with("ERROR 0A000: cached plan") or message.starts_with("ERROR 26000:")
+}
+
 // ===== public API =====
 
 fun establish_connection(
@@ -628,6 +676,9 @@ fun establish_connection(
             stream: stream,
             server_version: session.server_version,
             backend_pid: session.backend_pid,
+            statements: Map.new(),
+            next_statement: 0,
+            cache_statements: true,
         ),
     )
 }
@@ -692,9 +743,7 @@ impl Connection {
     // the safe way to pass user input. Types are inferred from context (column
     // types, casts), e.g. "INSERT INTO t (n) VALUES ($1)" or "... WHERE id = $1".
     fun query_params(self, sql: str, params: list[str]) -> Result[QueryResult, Error] {
-        let batch = extended_query(sql, text_params(params))?
-        let _ = write_all(self.stream, batch)?
-        return read_query_result(self.stream)
+        return self.query_optional_params(sql, text_params(params))
     }
 
     // Parameterized query variant that can bind SQL NULL with `None`.
@@ -703,9 +752,60 @@ impl Connection {
         sql: str,
         params: list[Option[str]],
     ) -> Result[QueryResult, Error] {
-        let batch = extended_query(sql, params)?
+        if not self.cache_statements {
+            let batch = extended_query(sql, params)?
+            let _ = write_all(self.stream, batch)?
+            return read_query_result(self.stream)
+        }
+        match self.statements.get(sql) {
+            case Some(name) {
+                let batch = extended_query_named(name, false, sql, params)?
+                let _ = write_all(self.stream, batch)?
+                let result = read_query_result(self.stream)
+                match result {
+                    case Err(e) {
+                        if stale_statement(e) {
+                            self.statements.remove(sql)
+                            return self.prepare_and_run(sql, params)
+                        }
+                    }
+                    case Ok(_) {}
+                }
+                return result
+            }
+            case None {
+                return self.prepare_and_run(sql, params)
+            }
+        }
+    }
+
+    fun prepare_and_run(self, sql: str, params: list[Option[str]]) -> Result[QueryResult, Error] {
+        if self.statements.len() >= MAX_CACHED_STATEMENTS {
+            let batch = extended_query(sql, params)?
+            let _ = write_all(self.stream, batch)?
+            return read_query_result(self.stream)
+        }
+        self.next_statement = self.next_statement + 1
+        let name = "rvpg_${self.next_statement}"
+        let batch = extended_query_named(name, true, sql, params)?
         let _ = write_all(self.stream, batch)?
-        return read_query_result(self.stream)
+        let parse = ParseState(complete: false)
+        let result = read_query_result_tracking(self.stream, parse)
+        if parse.complete {
+            self.statements.set(sql, name)
+        }
+        return result
+    }
+
+    // Turn the prepared-statement cache on or off. Turn it off behind a pooler
+    // in transaction mode, where a later command may reach another session.
+    fun set_statement_cache(self, enabled: bool) {
+        self.cache_statements = enabled
+    }
+
+    // Number of statements prepared and cached on this connection.
+    fun cached_statements(self) -> int {
+        return self.statements.len()
     }
 
     // Run a statement and return just the affected-row count.
